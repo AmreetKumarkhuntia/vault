@@ -1,0 +1,521 @@
+<title>Testkit Blueprint</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#F6F7F9;
+  --surface:#FFFFFF;
+  --surface-2:#EEF1F4;
+  --ink:#1B2129;
+  --muted:#59636F;
+  --faint:#8B95A1;
+  --line:#DCE1E7;
+  --accent:#0F766E;
+  --accent-ink:#0B5D57;
+  --accent-soft:#0F766E1A;
+  --ok:#187A4B;
+  --bad:#BE3E3E;
+  --term-bg:#12181D;
+  --term-ink:#D8E0E6;
+  --term-dim:#7A8894;
+  --term-ok:#5BD48F;
+  --term-bad:#F07E7E;
+  --code-bg:#F0F2F5;
+  --shadow:0 1px 2px rgba(20,28,36,.05),0 4px 14px rgba(20,28,36,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#10151A;
+    --surface:#171E24;
+    --surface-2:#1E262E;
+    --ink:#E6EBEF;
+    --muted:#9BA6B1;
+    --faint:#6C7883;
+    --line:#2A333C;
+    --accent:#3ECFC0;
+    --accent-ink:#6ADFD2;
+    --accent-soft:#3ECFC022;
+    --ok:#4FC98A;
+    --bad:#EF8A8A;
+    --code-bg:#131A20;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#10151A;
+  --surface:#171E24;
+  --surface-2:#1E262E;
+  --ink:#E6EBEF;
+  --muted:#9BA6B1;
+  --faint:#6C7883;
+  --line:#2A333C;
+  --accent:#3ECFC0;
+  --accent-ink:#6ADFD2;
+  --accent-soft:#3ECFC022;
+  --ok:#4FC98A;
+  --bad:#EF8A8A;
+  --code-bg:#131A20;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.25);
+}
+*{box-sizing:border-box}
+body{
+  background:var(--bg);
+  color:var(--ink);
+  font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-size:16px;
+  line-height:1.62;
+  margin:0;
+  padding-inline:20px;
+  padding-block:0 72px;
+}
+.wrap{max-width:880px;margin:0 auto}
+header.doc{padding-block:56px 8px;border-bottom:1px solid var(--line);margin-bottom:8px}
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--accent);font-weight:600;margin:0 0 10px;
+}
+h1{
+  font-family:"Zilla Slab",Georgia,serif;font-weight:700;font-size:clamp(34px,6vw,48px);
+  line-height:1.08;margin:0 0 12px;text-wrap:balance;
+}
+.sub{color:var(--muted);max-width:64ch;margin:0 0 22px;font-size:17px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:28px}
+.chip{
+  font-family:"IBM Plex Mono",monospace;font-size:12.5px;font-weight:500;
+  border:1px solid var(--line);background:var(--surface);color:var(--muted);
+  padding:4px 11px;border-radius:999px;
+}
+.chip.hot{border-color:transparent;background:var(--accent-soft);color:var(--accent-ink)}
+h2{
+  font-family:"Zilla Slab",Georgia,serif;font-weight:600;font-size:27px;line-height:1.2;
+  margin:56px 0 6px;text-wrap:balance;
+}
+h2 .no{color:var(--accent);font-weight:700;margin-right:10px;font-variant-numeric:tabular-nums}
+h3{
+  font-family:"Zilla Slab",Georgia,serif;font-weight:600;font-size:19.5px;
+  margin:34px 0 6px;text-wrap:balance;
+}
+p{margin:10px 0;max-width:72ch}
+ul,ol{margin:10px 0;padding-left:24px;max-width:72ch}
+li{margin:5px 0}
+li::marker{color:var(--faint)}
+strong{font-weight:600}
+a{color:var(--accent-ink);text-decoration-color:var(--line);text-underline-offset:3px}
+a:hover{text-decoration-color:var(--accent)}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+code{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:.86em;
+  background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:1px 5px;
+}
+pre{
+  background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+  padding:16px 18px;overflow-x:auto;line-height:1.55;margin:14px 0;
+}
+pre code{background:none;border:none;padding:0;font-size:13px}
+.c{color:var(--faint)}
+.k{color:var(--accent-ink);font-weight:500}
+.toc{
+  background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:18px 22px;margin:26px 0 8px;box-shadow:var(--shadow);
+}
+.toc p{margin:0 0 8px;font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);font-weight:600}
+.toc ol{margin:0;padding-left:0;list-style:none;columns:2;column-gap:32px}
+.toc li{margin:3px 0;break-inside:avoid}
+.toc a{text-decoration:none;color:var(--ink);font-size:14.5px}
+.toc a:hover{color:var(--accent-ink)}
+.toc .n{font-family:"IBM Plex Mono",monospace;color:var(--accent);font-size:12.5px;margin-right:8px;font-variant-numeric:tabular-nums}
+@media (max-width:560px){.toc ol{columns:1}}
+.tablewrap{overflow-x:auto;margin:14px 0;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:14px;min-width:560px}
+th{
+  text-align:left;font-family:"IBM Plex Mono",monospace;font-size:11.5px;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:600;
+  padding:10px 14px;border-bottom:1px solid var(--line);background:var(--surface-2);
+}
+td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td:first-child{white-space:nowrap;font-weight:600}
+td code{white-space:nowrap}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:18px 0}
+.flow .st{
+  font-family:"IBM Plex Mono",monospace;font-size:12.5px;font-weight:500;
+  background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:5px 10px;
+}
+.flow .st.hi{background:var(--accent-soft);border-color:transparent;color:var(--accent-ink);font-weight:600}
+.flow .ar{color:var(--faint);font-size:13px}
+.term{
+  background:var(--term-bg);color:var(--term-ink);border-radius:10px;
+  padding:16px 18px;overflow-x:auto;margin:14px 0;border:1px solid rgba(255,255,255,.06);
+}
+.term pre{background:none;border:none;padding:0;margin:0}
+.term code{background:none;border:none;color:inherit}
+.term .tl{color:var(--term-dim)}
+.term .tok{color:var(--term-ok)}
+.term .tbad{color:var(--term-bad)}
+.term .tt{color:#9FD1E8}
+.callout{
+  border-left:3px solid var(--accent);background:var(--surface);
+  border-radius:0 8px 8px 0;padding:12px 18px;margin:16px 0;box-shadow:var(--shadow);
+}
+.callout p{margin:6px 0}
+.callout .cl{
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--accent-ink);font-weight:600;
+}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+@media (max-width:640px){.grid2{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+.panel h4{
+  margin:0 0 6px;font-family:"IBM Plex Mono",monospace;font-size:12px;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:600;
+}
+.panel p,.panel ul{font-size:14.5px;margin:6px 0}
+.ok{color:var(--ok);font-weight:600}
+.bad{color:var(--bad);font-weight:600}
+.dim{color:var(--muted)}
+hr{border:none;border-top:1px solid var(--line);margin:48px 0}
+footer{
+  margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
+  color:var(--faint);font-size:13.5px;font-family:"IBM Plex Mono",monospace;
+}
+</style>
+
+<div class="wrap">
+
+<header class="doc">
+  <p class="eyebrow">Design &amp; implementation plan</p>
+  <h1>testkit — black-box API test harness</h1>
+  <p class="sub">A Rust CLI that surrounds an untouched HTTP server with everything it needs to be tested: seeded Postgres &amp; Redis, a recording mock for its external dependencies, YAML-defined test cases, and verification that tells you <em>exactly which expected insertion or outbound call is missing</em>.</p>
+  <div class="chips">
+    <span class="chip hot">Rust · tokio</span>
+    <span class="chip">YAML-defined tests</span>
+    <span class="chip">Postgres + Redis first</span>
+    <span class="chip">CLI runner + step mode</span>
+    <span class="chip">Status: awaiting approval</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <p>Contents</p>
+  <ol>
+    <li><a href="#s1"><span class="n">1</span>What it does &amp; why</a></li>
+    <li><a href="#s2"><span class="n">2</span>System overview &amp; test lifecycle</a></li>
+    <li><a href="#s3"><span class="n">3</span>The YAML test language</a></li>
+    <li><a href="#s4"><span class="n">4</span>Verification semantics</a></li>
+    <li><a href="#s5"><span class="n">5</span>Crate architecture</a></li>
+    <li><a href="#s6"><span class="n">6</span>CLI &amp; step-by-step mode</a></li>
+    <li><a href="#s7"><span class="n">7</span>Dependencies</a></li>
+    <li><a href="#s8"><span class="n">8</span>Implementation roadmap</a></li>
+    <li><a href="#s9"><span class="n">9</span>Risks &amp; decided defaults</a></li>
+  </ol>
+</nav>
+
+<h2 id="s1"><span class="no">1</span>What it does &amp; why</h2>
+<p>The system under test (the <strong>target</strong>) is a black box: an HTTP API server started separately, never modified. Its only coupling to the harness is configuration — its database DSNs point at the test stores, and its third-party base URLs point at testkit's embedded mock server.</p>
+<p>Each requirement from the original brief maps to a first-class feature:</p>
+<div class="tablewrap"><table>
+  <tr><th>Requirement</th><th>How testkit handles it</th></tr>
+  <tr><td>Black-box server</td><td>Target runs untouched; testkit only needs its base URL and a health endpoint.</td></tr>
+  <tr><td>Dynamic test driver</td><td>The CLI engine fires GET/POST/PUT/DELETE steps at the target per YAML definition, chaining captured values between steps.</td></tr>
+  <tr><td>Mocked external calls</td><td>One embedded HTTP listener impersonates every dependency (path-prefix per service), serves canned/sequenced responses, and records every request it receives.</td></tr>
+  <tr><td>Pre-seeded DB reads</td><td><code>seed:</code> blocks insert Postgres rows and Redis keys before each test, inside one transaction.</td></tr>
+  <tr><td>Verify missing insertions</td><td><code>verify.postgres:</code> reports precisely <em>which</em> expected row is absent, with a per-column near-miss diff against the closest actual row.</td></tr>
+  <tr><td>Verify PUT/POST/DELETE the app makes</td><td><code>verify.calls:</code> matches the mock's recording log against expectations — missed calls, unexpected calls, wrong-body near-misses, and ordering.</td></tr>
+  <tr><td>One-by-one execution</td><td>Run a single test by name, filter by tag/glob, or <code>--step</code> through a test interactively, inspecting DB, variables, and recorded calls at each pause.</td></tr>
+  <tr><td>Use previous test's data</td><td><strong>Flows</strong>: ordered chains of tests in a <code>*.flow.yaml</code> — a stage <code>export</code>s its captures, later stages consume them as <code>{{ flow.* }}</code>, with the flow as the isolation unit.</td></tr>
+</table></div>
+
+<h2 id="s2"><span class="no">2</span>System overview &amp; test lifecycle</h2>
+<pre><code>                  ┌────────────────────────────────────────┐
+ YAML suites ───▶ │              testkit (CLI)             │
+                  │    dsl ─▶ core engine ─▶ report        │
+                  └──────┬──────────┬───────────┬──────────┘
+                  seeds/ │          │ steps     │ serves canned deps,
+                  verify │          │ (reqwest) │ records every request
+                         ▼          ▼           ▼
+                   ┌──────────┐  ┌────────┐  ┌───────────┐
+                   │ Postgres │  │ TARGET │─▶│ mock deps │
+                   │  Redis   │◀─│  (black box HTTP srv) │
+                   └──────────┘  └────────┴───────────────┘</code></pre>
+
+<p>Every test runs through a fixed state machine:</p>
+<div class="flow">
+  <span class="st">LOAD</span><span class="ar">→</span>
+  <span class="st">VALIDATE</span><span class="ar">→</span>
+  <span class="st">RESET</span><span class="ar">→</span>
+  <span class="st">SEED</span><span class="ar">→</span>
+  <span class="st">ARM MOCKS</span><span class="ar">→</span>
+  <span class="st hi">RUN STEPS</span><span class="ar">→</span>
+  <span class="st hi">VERIFY END-STATE</span><span class="ar">→</span>
+  <span class="st">REPORT</span><span class="ar">→</span>
+  <span class="st">CLEANUP</span>
+</div>
+<ul>
+  <li><strong>Validate everything before running anything.</strong> All YAML is parsed and cross-checked up front (unknown fields, dangling template references, undefined mock names). A bad suite aborts the whole run with exit&nbsp;2 before a single test executes.</li>
+  <li><strong>Reset before, not clean after.</strong> Isolation runs at the <em>start</em> of each test (<code>TRUNCATE … RESTART IDENTITY CASCADE</code>, <code>FLUSHDB</code>, clear mock state). A crashed run can never poison the next one, and failed-test state stays in place for post-mortem inspection.</li>
+  <li><strong>Fail-fast between steps, collect-all within.</strong> A failed step stops the step sequence (later captures would be garbage), but all assertions inside a step are evaluated and reported together.</li>
+  <li><strong>End-state verification always runs</strong> — even when a step failed. “The response was wrong <em>and</em> here's what actually hit the DB and mocks” is the debugging gold.</li>
+  <li><strong>Run-level preflight</strong> probes the target's health endpoint, Postgres, Redis, and the mock listener before test #1; any failure exits 3 immediately with a reachability table instead of letting forty tests time out.</li>
+  <li><strong>Serial in v1.</strong> One target and one database means one test at a time; the session abstractions reserve clean hooks for parallel lanes later.</li>
+</ul>
+
+<h2 id="s3"><span class="no">3</span>The YAML test language</h2>
+<p>Tests are pure data — no scripts, no Rust. That constraint is what lets the engine enumerate exactly what is missing when something fails.</p>
+
+<h3>File layout &amp; global config</h3>
+<pre><code>tests/
+  testkit.yaml              <span class="c"># global config: environments, DSNs, mock bind, defaults</span>
+  fixtures/                 <span class="c"># shared seed/mock fragments, .sql files</span>
+  orders/
+    _suite.yaml             <span class="c"># optional per-directory defaults (tags, shared seeds, timeouts)</span>
+    create_order.test.yaml  <span class="c"># one test per file</span></code></pre>
+<p><code>testkit.yaml</code> holds environments (<code>local</code>, <code>ci</code>, …) with the target base URL + health check, Postgres/Redis URLs, and the mock bind address. Connection strings live <em>only</em> here — a test file can never silently point at production. Layering: CLI flags &gt; <code>TESTKIT_*</code> env vars &gt; <code>testkit.yaml</code>.</p>
+
+<h3>Anatomy of a test</h3>
+<p>A complete, realistic example — create an order, which charges a card through a mocked payment service, inserts a row, and warms a cache:</p>
+<pre><code><span class="k">test:</span> create order happy path
+<span class="k">tags:</span> [orders, smoke]
+
+<span class="k">seed:</span>
+  <span class="k">postgres:</span>
+    - table: users
+      rows: [{ id: 1, email: alice@example.com, status: active }]
+    - table: wallets
+      rows: [{ user_id: 1, balance_cents: 50000, currency: USD }]
+  <span class="k">redis:</span>
+    - set: { key: "session:alice", value: tok_abc, ttl: 600 }
+
+<span class="k">mocks:</span>
+  <span class="k">payments:</span>                      <span class="c"># target's PAYMENTS_URL → {{ mock.payments.base_url }}</span>
+    unmatched: fail              <span class="c"># any request no stub matches → 599 + test fails</span>
+    stubs:
+      - name: charge-ok
+        match:  { method: POST, path: /v1/charges,
+                  body: { json_partial: { currency: USD } } }
+        response: { status: 201, json: { id: "ch_{{ uuid() }}", status: succeeded },
+                    latency: 30ms }
+  <span class="k">email:</span>
+    stubs:
+      - name: send-ok
+        match: { method: POST, path: /send }
+        response: { status: 202 }
+
+<span class="k">steps:</span>
+  - name: create
+    request:
+      method: POST
+      path: /api/orders
+      headers: { Authorization: Bearer tok_abc }
+      json: { user_id: 1, items: [{ sku: SKU-BOOK, qty: 1, price_cents: 2500 }] }
+    expect:
+      status: 201
+      json_partial: { status: pending, user_id: 1 }
+    capture:
+      order_id: { jsonpath: $.id }          <span class="c"># JSON-typed: a number stays a number</span>
+
+  - name: order visible
+    request: { method: GET, path: "/api/orders/{{ order_id }}" }
+    expect:  { status: 200, json_partial: { total_cents: 2500 } }
+    repeat:  { every: 200ms, timeout: 5s }  <span class="c"># HTTP-level polling</span>
+
+<span class="k">verify:</span>                            <span class="c"># end-state, evaluated after all steps</span>
+  <span class="k">postgres:</span>
+    - table: orders
+      expect:
+        - user_id: 1
+          status: pending
+          total_cents: 2500
+          external_charge_id: { regex: "^ch_" }
+          created_at: !near-now 10s   <span class="c"># tag matchers: !any !uuid !iso8601 !null …</span>
+      count: exact                    <span class="c"># extra rows in this key-space = failure</span>
+      eventually: 5s                  <span class="c"># bounded polling for async writers</span>
+    - table: wallets
+      expect: [{ user_id: 1, balance_cents: 47500 }]
+  <span class="k">redis:</span>
+    - key: "order:{{ order_id }}:summary"
+      json_partial: { status: pending }
+      ttl: { gt: 0 }
+  <span class="k">calls:</span>                           <span class="c"># what the TARGET sent to its dependencies</span>
+    - name: exactly one charge
+      dependency: payments
+      match: { method: POST, path: /v1/charges }
+      body:  { json_partial: { amount_cents: 2500, order_ref: "{{ order_id }}" } }
+      count: 1
+    - name: confirmation email
+      dependency: email
+      match: { method: POST, path: /send }
+      count: 1
+  <span class="k">ordered:</span> [[exactly one charge, confirmation email]]
+  <span class="k">unexpected:</span> fail               <span class="c"># unplanned traffic to mocked deps fails the test</span></code></pre>
+
+<h3>Templating &amp; reuse</h3>
+<ul>
+  <li><strong>minijinja</strong>, expressions only (<code>{{ }}</code>; logic blocks rejected in v1 — tests stay declarative). Namespaces: <code>vars.*</code>, <code>steps.&lt;name&gt;.captures.*</code> (plus flat shorthand), <code>mock.&lt;dep&gt;.base_url</code>, allow-listed <code>env.*</code>; builtins <code>uuid()</code>, <code>now()</code> (frozen per test so <code>!near-now</code> has a stable anchor), <code>random_int()</code>.</li>
+  <li><strong>Typing rule:</strong> a scalar that is exactly one expression substitutes the native JSON value — captured numbers stay numbers, which is what makes DB matchers work.</li>
+  <li><strong>Reuse:</strong> YAML anchors, <code>fixture:</code> file includes for seeds/mocks, <code>{$include: path, with: {…}}</code> deep-merge, and <code>_suite.yaml</code> defaults. No test inheritance in v1.</li>
+</ul>
+
+<h3>Chaining tests: flows (use one test's data in the next)</h3>
+<p>Step captures chain data <em>within</em> a test. To reuse data <em>across</em> tests — the create-order test's <code>order_id</code> feeding the update and delete tests — an ordered chain of existing tests is declared in a <code>*.flow.yaml</code> file:</p>
+<pre><code><span class="c"># tests/orders/lifecycle.flow.yaml</span>
+<span class="k">flow:</span> order lifecycle
+<span class="k">reset:</span> once                  <span class="c"># the flow is the isolation unit: DB/Redis reset before stage 1 only</span>
+<span class="k">stages:</span>
+  - test: create order happy path
+    export: [order_id]        <span class="c"># promote this test's captures into flow scope</span>
+  - test: update order
+    with: { order_id: "{{ flow.order_id }}" }   <span class="c"># injected into that test's vars</span>
+  - test: delete order
+    with: { order_id: "{{ flow.order_id }}" }
+<span class="k">on_failure:</span> skip-rest        <span class="c"># later stages report SKIPPED(dependency failed), never silent green</span></code></pre>
+<ul>
+  <li><strong>Tests stay independently runnable</strong> — they declare inputs as <code>vars:</code> with defaults (or <code>required: true</code>); <code>with:</code> overrides them, and nothing inside a test file knows about flows.</li>
+  <li><strong>Exports are explicit and validated</strong> — a <code>{{ flow.* }}</code> reference no earlier stage exports is a static validation error, before anything runs. Values stay JSON-typed.</li>
+  <li><strong>Per-stage mocks and verify</strong> — each stage arms its own mock session and recording buffer, so <code>verify.calls</code> never sees a previous stage's traffic.</li>
+  <li><strong>CLI:</strong> <code>testkit run 'order lifecycle'</code> runs the chain; naming a mid-flow stage runs everything up to and including it. Flows shuffle as one atomic unit, and <code>--step</code> pauses across stage boundaries too.</li>
+  <li><strong>Deferred:</strong> a free-form <code>needs:</code> dependency DAG — linear flows are deterministic and reportable, and a DAG can layer on later without breaking the DSL.</li>
+</ul>
+
+<h2 id="s4"><span class="no">4</span>Verification semantics</h2>
+<p>This is the product. Every failure is a structured object — kind, YAML path, expected value, near-misses with field-level diffs — rendered identically to the terminal and the JSON report.</p>
+
+<h3>Missing insertions, precisely</h3>
+<p>Expected rows drive <em>targeted queries</em> (no full-table snapshots by default). Literal columns become the SQL <code>WHERE</code>; matcher columns (<code>!uuid</code>, <code>{ gt: 0 }</code>, regex…) check client-side. Actual rows are assigned to expectations — upgraded to proper bipartite matching when expectations overlap, so a greedy order can never produce a false negative. An unmatched expectation gets a ranked near-miss report:</p>
+<div class="term"><pre><code><span class="tbad">✗</span> postgres: table `orders` — 1 of 2 expected rows <span class="tbad">MISSING</span>  <span class="tl">(after 5.0s, 24 attempts)</span>
+  <span class="tl">closest actual row: id=482 — 3 of 4 columns match</span>
+
+  <span class="tl">column        expected                     actual</span>
+  user_id       1                            1                        <span class="tok">✓</span>
+  status        confirmed                    <span class="tbad">pending</span>                  <span class="tbad">✗</span>
+  total_cents   4200                         4200                     <span class="tok">✓</span>
+  created_at    <span class="tt">&lt;within 5s of test start&gt;</span>   2026-09-23T10:14:02Z     <span class="tok">✓</span></code></pre></div>
+<p class="dim">“Row not found” is never the whole message — the report shows the closest candidate and exactly which column diverged.</p>
+
+<h3>Outbound-call verification</h3>
+<p>The mock records <em>every</em> request unconditionally (with a global sequence number), whether or not a stub matched. Verification is an assignment problem: each expectation absorbs between <code>lo</code> and <code>hi</code> recorded calls, each call counts at most once, lower bounds satisfied by bipartite matching. Leftover recordings to mocked dependencies are <span class="bad">UNEXPECTED_CALL</span> failures; unsatisfied expectations are <span class="bad">MISSED_CALL</span> failures with a weighted near-miss (“method ✓ path ✓ body ✗” plus a JSON diff). <code>ordered:</code> groups check sequence numbers. A <code>dedupe:</code> key collapses target retries before counting.</p>
+
+<h3>Eventual consistency: <code>eventually:</code> with settle semantics</h3>
+<p>Targets often write to the DB or call dependencies <em>after</em> responding. Any end-state assertion accepts <code>eventually: 5s</code> — a shared poll loop per verify block. Positive assertions pass on the first fully-successful poll. Negative assertions (absence, <code>count: 0</code>, no-unexpected-calls) must hold <em>continuously for a settle window</em> (default 500&nbsp;ms) — an instantaneous “nothing arrived yet” proves nothing about in-flight async work.</p>
+
+<h3>Watch mode (opt-in)</h3>
+<p><code>watch: [orders, payments]</code> snapshots PK + row-hash per table before steps and diffs after. Every observed insert/update/delete must be <em>claimed</em> by an expectation; unclaimed diffs fail as <span class="bad">UNEXPECTED_CHANGE</span> with before/after values. This is the “nothing else changed” guarantee, priced honestly at two scans per watched table.</p>
+
+<h3>Isolation strategy</h3>
+<div class="grid2">
+  <div class="panel">
+    <h4>Postgres</h4>
+    <p><code>TRUNCATE t1, t2… RESTART IDENTITY CASCADE</code> in one statement before each test. Table list from config or <code>information_schema</code> minus exclusions (migration tables). Fast, resets sequences, safe while the target holds pool connections.</p>
+    <p class="dim">Transaction-rollback isolation is <strong>impossible</strong> for a black-box target — it owns its own connections, so its writes can't be inside our transaction and our uncommitted seeds would be invisible to it. Documented loudly.</p>
+  </div>
+  <div class="panel">
+    <h4>Redis</h4>
+    <p>Dedicated logical DB (e.g. <code>db 15</code>) + <code>FLUSHDB ASYNC</code>. Preflight refuses db&nbsp;0 without an explicit override flag. Prefix-SCAN deletion is the fallback for Redis Cluster.</p>
+    <p class="dim"><code>testkit run --shuffle --seed N</code> audits that tests really are order-independent.</p>
+  </div>
+</div>
+
+<h2 id="s5"><span class="no">5</span>Crate architecture</h2>
+<pre><code>testkit/
+├── Cargo.toml                   <span class="c"># [workspace]</span>
+├── docker-compose.yaml          <span class="c"># pg :5433 + redis :6380 for dev &amp; self-tests</span>
+├── crates/
+│   ├── testkit-dsl/             <span class="c"># YAML schema, parsing, static validation</span>
+│   ├── testkit-store/           <span class="c"># LEAF: StateStore traits + outcome types</span>
+│   ├── testkit-store-postgres/  <span class="c"># sqlx driver: seed / verify / reset / watch</span>
+│   ├── testkit-store-redis/     <span class="c"># redis driver, same shape</span>
+│   ├── testkit-mock/            <span class="c"># axum listener, sessions, matcher, recorder</span>
+│   ├── testkit-core/            <span class="c"># engine, templating, http, capture, jsondiff</span>
+│   ├── testkit-report/          <span class="c"># pretty / JSON / JUnit renderers</span>
+│   └── testkit-cli/             <span class="c"># clap + figment; the ONLY crate that knows drivers</span>
+└── examples/demo-target/        <span class="c"># tiny axum app: testkit's own e2e testbed</span></code></pre>
+
+<div class="callout">
+  <p class="cl">The key extensibility trick — driver-owned documents</p>
+  <p>The YAML under <code>seed.postgres:</code> or <code>verify.redis:</code> is <em>not</em> parsed into a universal schema (none fits PG tables, Redis keys, and a future Mongo collection at once). The DSL keeps store blocks as raw values tagged by store kind; each driver deserializes and validates its own block. Adding MySQL later = one new crate + one registration line in the CLI. Nothing else changes.</p>
+</div>
+
+<p>The trait boundary the whole design hangs on:</p>
+<pre><code><span class="c">// testkit-store — the leaf crate every driver implements</span>
+#[async_trait]
+pub trait StateStore: Send + Sync {
+    async fn ping(&amp;self) -&gt; Result&lt;(), StoreError&gt;;
+    async fn reset(&amp;self, spec: &amp;ResetSpec) -&gt; Result&lt;(), StoreError&gt;;
+    async fn seed(&amp;self, doc: &amp;StoreDoc) -&gt; Result&lt;SeedReceipt, StoreError&gt;;
+    async fn snapshot(&amp;self, doc: &amp;StoreDoc) -&gt; Result&lt;Snapshot, StoreError&gt;;  <span class="c">// watch mode</span>
+    <span class="c">// NEVER Err for a failed assertion — that's data in VerifyOutcome.</span>
+    <span class="c">// Err is reserved for harness faults (connection lost, type error).</span>
+    async fn verify(&amp;self, doc: &amp;StoreDoc, opts: &amp;VerifyOpts) -&gt; Result&lt;VerifyOutcome, StoreError&gt;;
+    async fn inspect(&amp;self, query: &amp;str) -&gt; Result&lt;Table, StoreError&gt;;         <span class="c">// step mode, read-only</span>
+}</code></pre>
+<p>Failure data is report-shaped from birth: <code>CheckFailure { yaml_path, expected, kind, near_misses, attempts, elapsed }</code> with kinds like <code>MissingRow</code>, <code>UnexpectedCall</code>, <code>ValueMismatch { diffs }</code>. The terminal renderer and the JSON report consume the same structs — the JSON report is lossless, never a re-parse of terminal text.</p>
+<p><strong>Mock internals:</strong> one axum listener for the whole run (the target reads its config once, so the address must be stable); N dependencies share it via path prefixes. Stubs match in declaration order, first full match wins — predictability over specificity scoring. Unmatched requests answer with status <strong>599</strong>: unmistakable in target logs, impossible to confuse with a real upstream. Serving is deliberately separate from verification (canned-serve now, strict verify later against the recording log) — which is why this is bare axum and not wiremock.</p>
+
+<h2 id="s6"><span class="no">6</span>CLI &amp; step-by-step mode</h2>
+<pre><code>testkit run [PATTERN] [--tag t]… [--env name] [--step] [--break-at test:step]
+            [--shuffle [--seed N]] [--report out.json] [--junit out.xml] [-v|-vv]
+testkit list [PATTERN] [--tag t]     <span class="c"># resolved run plan, no execution</span>
+testkit validate [--live]            <span class="c"># static checks; --live dry-runs seeds, rolled back</span>
+testkit env [--env name]             <span class="c"># print mock/dependency URLs to export before starting target</span></code></pre>
+<p>Exit codes: <code>0</code> pass · <code>1</code> a test failed · <code>2</code> config/usage error · <code>3</code> environment/preflight error · <code>130</code> interrupted. CI dashboards can tell “broken tests” from “broken environment”.</p>
+<p><code>--step</code> pauses after seeding, after arming mocks, after every step, and before end-state verification:</p>
+<div class="tablewrap"><table>
+  <tr><th>Command</th><th>Effect</th></tr>
+  <tr><td><code>c</code> / <code>n</code></td><td>Continue to next pause / advance one</td></tr>
+  <tr><td><code>resp</code></td><td>Last step's full request and response</td></tr>
+  <tr><td><code>vars</code></td><td>Variable scope chain, including captures so far</td></tr>
+  <tr><td><code>calls [dep|seq]</code></td><td>Mock recording log as a table, or one exchange in full detail</td></tr>
+  <tr><td><code>db &lt;sql&gt;</code></td><td>Query Postgres inside <code>BEGIN READ ONLY … ROLLBACK</code></td></tr>
+  <tr><td><code>redis &lt;cmd&gt;</code></td><td>Allow-listed read-only Redis commands</td></tr>
+  <tr><td><code>verify</code></td><td>Run the verify block right now, non-destructively, single-shot</td></tr>
+  <tr><td><code>q</code> / <code>Q</code></td><td>Abort this test / abort the whole run</td></tr>
+</table></div>
+
+<h2 id="s7"><span class="no">7</span>Dependencies</h2>
+<div class="tablewrap"><table>
+  <tr><th>Concern</th><th>Crate</th><th>Why</th></tr>
+  <tr><td>Runtime / CLI</td><td><code>tokio</code>, <code>clap</code> v4, <code>figment</code></td><td>Ecosystem defaults; figment gives flags &gt; env &gt; file layering.</td></tr>
+  <tr><td>YAML</td><td><code>serde_yaml_ng</code></td><td><code>serde_yaml</code> is archived; API-identical maintained fork, <code>deny_unknown_fields</code> everywhere.</td></tr>
+  <tr><td>Templating</td><td><code>minijinja</code></td><td>Tiny, serde-native, sandboxed; custom fns. Hand-rolled substitution rejected — users immediately want filters and typing.</td></tr>
+  <tr><td>HTTP client / mock</td><td><code>reqwest</code> (rustls), <code>axum</code> 0.8</td><td>Per-request timeouts; one catch-all handler with our data-driven matcher (wiremock's matchers are code-first).</td></tr>
+  <tr><td>Postgres</td><td><code>sqlx</code> (runtime queries)</td><td>Table names come from YAML — compile-time macros are useless here.</td></tr>
+  <tr><td>Redis</td><td><code>redis</code> (tokio, ConnectionManager)</td><td>Auto-reconnect fits long runs; SCAN/FLUSHDB/typed reads.</td></tr>
+  <tr><td>JSON tooling</td><td><code>serde_json_path</code>, own <code>jsondiff</code></td><td>RFC 9535 JSONPath; ~200 lines of diffing we should own so reports get structured <code>FieldDiff</code>s.</td></tr>
+  <tr><td>Diagnostics</td><td><code>thiserror</code>/<code>anyhow</code>, <code>tracing</code></td><td>Typed errors at boundaries; spans per test/step, JSON log layer for CI.</td></tr>
+  <tr><td>Terminal</td><td><code>comfy-table</code>, <code>owo-colors</code>, <code>indicatif</code>, <code>rustyline</code></td><td>Diff tables, NO_COLOR-respecting color, progress, the step-mode prompt.</td></tr>
+</table></div>
+
+<h2 id="s8"><span class="no">8</span>Implementation roadmap</h2>
+<p>Seven milestones, ordered so a usable slice exists from the first one. Each lands with unit tests plus e2e self-tests: YAML suites run against <code>examples/demo-target</code> (a small axum app with Postgres writes, a Redis cache, two mocked dependencies, and one deliberately-async endpoint), including <em>negative fixtures</em> — tests that must fail with a specific failure kind, asserted from the JSON report.</p>
+<div class="tablewrap"><table>
+  <tr><th>Milestone</th><th>Scope</th><th>Exit criterion</th></tr>
+  <tr><td>M1 · Walking skeleton</td><td>Workspace, docker-compose, demo-target, YAML parse + validate, step executor, HTTP assertions, pretty output, exit codes</td><td>One YAML test with response assertions runs against the demo target; pass/fail correct in CI</td></tr>
+  <tr><td>M2 · Templating &amp; capture</td><td>minijinja + typing rule, <code>capture:</code>, multi-step chaining, step <code>repeat:</code>, JSON report, preflight</td><td>A two-step test captures an id from step 1 and uses it in step 2's URL</td></tr>
+  <tr><td>M3 · Postgres verification</td><td>Store traits + registry, PG driver: seeding, TRUNCATE reset, assignment + near-miss engine, <code>validate --live</code></td><td><strong>A missing expected insertion reports exactly which row, with a per-column near-miss diff</strong></td></tr>
+  <tr><td>M4 · Mock server</td><td>Listener, sessions with Drop-guards, ordered matching, response sequences, unconditional recording, 599 unmatched, <code>verify.calls</code>, <code>testkit env</code></td><td>Full §3 example (minus Redis) green; a missed/unexpected call renders with component diffs</td></tr>
+  <tr><td>M5 · Redis + async</td><td>Redis driver, <code>eventually:</code> shared poll loop with settle semantics, <code>watch:</code> snapshots</td><td>Async-writing endpoint passes with <code>eventually:</code>; a stray write to a watched table fails</td></tr>
+  <tr><td>M6 · Flows</td><td><code>*.flow.yaml</code> schema + export validation, flow runner with <code>reset: once</code>, <code>with:</code> var injection, per-stage mock sessions, SKIPPED propagation, flow-aware run/list/shuffle/step</td><td>Create→update→delete flow runs green reusing <code>order_id</code> across tests; a failed stage 1 marks stages 2–3 SKIPPED</td></tr>
+  <tr><td>M7 · DX &amp; CI polish</td><td><code>--step</code> REPL, <code>--break-at</code>, filters, <code>--shuffle</code>, JUnit, includes/fixtures, JSON Schema for editors, secret redaction, docs</td><td>A QA engineer onboards from docs alone and debugs a failing async test with <code>--step</code></td></tr>
+</table></div>
+
+<h2 id="s9"><span class="no">9</span>Risks &amp; decided defaults</h2>
+<div class="tablewrap"><table>
+  <tr><th>Risk</th><th>Mitigation</th></tr>
+  <tr><td>YAML → PG type impedance</td><td>Driver caches <code>information_schema</code> column types and binds with explicit casts; <code>validate --live</code> dry-runs seeds in a rolled-back transaction; type errors name table, column, and YAML path.</td></tr>
+  <tr><td>Isolation leaks</td><td>Reset-before-test; settle quiesce before verify; <code>unmatched: fail</code> surfaces stray background calls; <code>--shuffle</code> audit. Target in-process caches don't reset with the DB — documented; a <code>reset.script</code> hook can hit a target reset endpoint if one exists.</td></tr>
+  <tr><td>Async flakiness vs speed</td><td><code>eventually:</code> + settle built into the verify options; failure reports carry the best observation across all polls, so even a flake report shows what was there.</td></tr>
+  <tr><td>Mock fidelity ceiling</td><td>Declaration-order matching is <em>the</em> documented rule; session-key hub reserves parallel/keyed routing; passthrough mode for hybrid setups.</td></tr>
+  <tr><td>Ecosystem drift</td><td>YAML isolated behind one crate; diffing owned in-tree; versions pinned at the workspace root; <code>version: 1</code> header in suite files.</td></tr>
+</table></div>
+
+<h3>Defaults chosen (revisit when needed)</h3>
+<ul>
+  <li><strong>Parallelism:</strong> serial v1; session abstractions keep parallel lanes open for v2.</li>
+  <li><strong>Target startup:</strong> stays external; <code>testkit env</code> bridges the config gap (fixed mock port for CI). An optional target-launcher can come later.</li>
+  <li><strong>Payloads:</strong> JSON + urlencoded + raw regex in v1; multipart/binary deferred.</li>
+  <li><strong>gRPC / Kafka dependencies:</strong> out of scope for v1; the keyed schema (<code>mocks.&lt;name&gt;</code>) extends without breaking changes.</li>
+  <li><strong>Parameterized tests:</strong> <code>matrix:</code> key reserved, feature deferred.</li>
+  <li><strong>Secrets:</strong> env interpolation + configured-header redaction in reports.</li>
+</ul>
+
+<footer>testkit · design v1 · 2026-09-23 · synthesized from three independent design passes (DSL / architecture / runtime)</footer>
+
+</div>
