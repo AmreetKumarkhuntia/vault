@@ -1,6 +1,13 @@
 # The whole release pipeline lives in one workflow: tags/releases created with
 # GITHUB_TOKEN do not trigger other workflows, so a separate `on: release`
 # build would silently never run.
+#
+# Release model: no release branches or PRs. On every push to main the
+# `version` job computes the next semver from conventional commits since the
+# last tag; when a release is due it commits the bump (Cargo.toml + Cargo.lock
+# + CHANGELOG.md) straight to main as `chore(release): vX.Y.Z`, tags that
+# commit, creates the GitHub Release, and the build/publish jobs deploy from
+# that exact commit.
 name: release
 
 on:
@@ -15,58 +22,116 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release-please:
-    if: github.event_name == 'push'
+  version:
+    # The release commit itself must not trigger another release.
+    if: >-
+      github.event_name == 'push' &&
+      !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.rp.outputs.release_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
-      prs_created: ${{ steps.rp.outputs.prs_created }}
-    steps:
-      - id: rp
-        uses: googleapis/release-please-action@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-  # release-please bumps Cargo.toml via the version annotation but cannot
-  # write Cargo.lock; cargo itself syncs it inside the release PR so the
-  # `--locked` release build stays honest.
-  sync-lockfile:
-    needs: release-please
-    if: needs.release-please.outputs.prs_created == 'true'
-    runs-on: ubuntu-latest
+      release_created: ${{ steps.decide.outputs.release_created }}
+      tag_name: ${{ steps.decide.outputs.tag_name }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: release-please--branches--main
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: sync workspace member versions into Cargo.lock
-        run: cargo update --workspace
-      - name: push lockfile to release PR if changed
+      - uses: Swatinem/rust-cache@v2
+
+      - name: compute next version from conventional commits
+        id: decide
         run: |
-          if ! git diff --quiet -- Cargo.lock; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add Cargo.lock
-            git commit -m "chore: sync Cargo.lock with release version"
-            git push origin HEAD:release-please--branches--main
+          set -euo pipefail
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          RANGE=${LAST_TAG:+${LAST_TAG}..HEAD}
+          SUBJECTS=$(git log --format='%s' ${RANGE:-HEAD})
+          FULL=$(git log --format='%s%n%b' ${RANGE:-HEAD})
+
+          BUMP=none
+          if echo "$FULL" | grep -qE '^[a-z]+(\([^)]*\))?!: |^BREAKING CHANGE'; then
+            BUMP=major
+          elif echo "$SUBJECTS" | grep -qE '^feat(\([^)]*\))?: '; then
+            BUMP=minor
+          elif echo "$SUBJECTS" | grep -qE '^(fix|perf)(\([^)]*\))?: '; then
+            BUMP=patch
           fi
 
+          CURRENT=$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)" # x-release-version$/\1/p' Cargo.toml)
+          test -n "$CURRENT" || { echo "version marker not found in Cargo.toml"; exit 1; }
+
+          if [ "$BUMP" = "none" ]; then
+            echo "no feat/fix/breaking commits since ${LAST_TAG:-the beginning} — no release"
+            echo "release_created=false" >> "$GITHUB_OUTPUT"
+            echo "tag_name=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Pre-1.0 semver: breaking changes bump the minor, not to 1.0.0.
+          NEW=$(echo "$CURRENT" | awk -F. -v bump="$BUMP" '{
+            major=$1; minor=$2; patch=$3;
+            if (major == 0 && bump == "major") bump = "minor";
+            if (bump == "major")      { major++; minor=0; patch=0 }
+            else if (bump == "minor") { minor++; patch=0 }
+            else                      { patch++ }
+            printf "%d.%d.%d", major, minor, patch
+          }')
+          echo "bump: $BUMP  $CURRENT -> $NEW"
+          echo "release_created=true" >> "$GITHUB_OUTPUT"
+          echo "tag_name=v$NEW" >> "$GITHUB_OUTPUT"
+          echo "NEW_VERSION=$NEW" >> "$GITHUB_ENV"
+          echo "LAST_TAG=$LAST_TAG" >> "$GITHUB_ENV"
+
+      - name: write release commit (version + lockfile + changelog)
+        if: steps.decide.outputs.release_created == 'true'
+        run: |
+          set -euo pipefail
+          sed -i -E "s/^version = \"[0-9]+\.[0-9]+\.[0-9]+\" # x-release-version$/version = \"${NEW_VERSION}\" # x-release-version/" Cargo.toml
+          cargo update --workspace
+
+          RANGE=${LAST_TAG:+${LAST_TAG}..HEAD}
+          {
+            echo "## v${NEW_VERSION} ($(date -u +%F))"
+            echo
+            for section in "Features:feat" "Fixes:fix|perf" "Other:docs|ci|chore|refactor|style|test"; do
+              title=${section%%:*}; types=${section#*:}
+              LINES=$(git log --format='- %s (%h)' ${RANGE:-HEAD} | grep -E "^- (${types})(\([^)]*\))?!?: " || true)
+              if [ -n "$LINES" ]; then
+                echo "### ${title}"
+                echo "$LINES" | sed -E 's/^- [a-z]+(\([^)]*\))?!?: /- /'
+                echo
+              fi
+            done
+          } > /tmp/release-notes.md
+
+          touch CHANGELOG.md
+          cat /tmp/release-notes.md CHANGELOG.md > /tmp/changelog.md
+          mv /tmp/changelog.md CHANGELOG.md
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): v${NEW_VERSION}"
+          git tag "v${NEW_VERSION}"
+          git push --atomic origin main "v${NEW_VERSION}"
+
+      - name: create GitHub release
+        if: steps.decide.outputs.release_created == 'true'
+        run: gh release create "v${NEW_VERSION}" --title "v${NEW_VERSION}" --notes-file /tmp/release-notes.md
+
   build:
-    needs: release-please
+    needs: version
     if: >-
       !cancelled() && (
         github.event_name == 'workflow_dispatch' ||
-        needs.release-please.outputs.release_created == 'true'
+        needs.version.outputs.release_created == 'true'
       )
     strategy:
       fail-fast: false
@@ -78,11 +143,11 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name || 'v0.0.0-dev' }}
+      TAG: ${{ inputs.tag || needs.version.outputs.tag_name || 'v0.0.0-dev' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name || github.sha }}
+          ref: ${{ inputs.tag || needs.version.outputs.tag_name || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -111,15 +176,15 @@ jobs:
           if-no-files-found: error
 
   upload-assets:
-    needs: [release-please, build]
+    needs: [version, build]
     if: >-
       !cancelled() && needs.build.result == 'success' && (
-        needs.release-please.outputs.release_created == 'true' ||
+        needs.version.outputs.release_created == 'true' ||
         inputs.tag != ''
       )
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      TAG: ${{ inputs.tag || needs.version.outputs.tag_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -134,10 +199,10 @@ jobs:
           gh release upload "$TAG" *.tar.gz SHA256SUMS --clobber
 
   npm-publish:
-    needs: [release-please, upload-assets]
+    needs: [version, upload-assets]
     if: >-
       !cancelled() && needs.upload-assets.result == 'success' && (
-        needs.release-please.outputs.release_created == 'true' ||
+        needs.version.outputs.release_created == 'true' ||
         inputs.tag != ''
       )
     runs-on: ubuntu-latest
@@ -145,11 +210,11 @@ jobs:
       contents: read
       id-token: write
     env:
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      TAG: ${{ inputs.tag || needs.version.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          ref: ${{ inputs.tag || needs.version.outputs.tag_name }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
