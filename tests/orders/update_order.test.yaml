@@ -1,0 +1,41 @@
+test: update order status
+description: PUT writes the new status, audits the change, invalidates the cache
+tags: [orders]
+
+# order_id is overridable by flows; the seeds make the test standalone-runnable
+# (conflict: ignore keeps them additive inside a reset-once flow).
+vars: { order_id: 900 }
+
+seed:
+  postgres:
+    - table: users
+      conflict: ignore
+      rows: [{ id: 1, email: alice@example.com, status: active }]
+    - table: orders
+      conflict: ignore
+      rows: [{ id: 900, user_id: 1, status: pending, total_cents: 1000 }]
+
+steps:
+  - name: ship it
+    request:
+      method: PUT
+      path: "/api/orders/{{ vars.order_id }}"
+      json: { status: shipped }
+    expect:
+      status: 200
+      json_partial: { status: shipped }
+
+verify:
+  postgres:
+    - table: orders
+      expect:
+        - id: "{{ vars.order_id }}"
+          status: shipped
+    - table: audit_log
+      expect:
+        - entity: order
+          entity_id: { regex: "^{{ vars.order_id }}$" }
+          action: "status:shipped"
+  redis:
+    - key: "order:{{ vars.order_id }}:summary"
+      absent: true

@@ -1,0 +1,30 @@
+version: 1
+
+environments:
+  local:
+    target:
+      base_url: http://127.0.0.1:8091
+      health_check: { path: /healthz, timeout: 20s }
+    postgres:
+      url: "${env.VAULT_PG_URL:-postgres://${env.USER}@localhost:5432/vault_demo}"
+    redis:
+      url: "${env.VAULT_REDIS_URL:-redis://127.0.0.1:6379/15}"
+    mock_server:
+      bind: 127.0.0.1:9095
+
+defaults:
+  request:
+    timeout: 10s
+    headers: { Content-Type: application/json }
+  mock:
+    unmatched: fail
+  reset:
+    postgres: { mode: truncate, exclude: [schema_migrations, _sqlx_migrations] }
+    redis: { mode: flushdb }
+  verify:
+    settle: 400ms
+    poll_interval: 100ms
+
+report:
+  json: target/vault-report.json
+  junit: target/vault-junit.xml

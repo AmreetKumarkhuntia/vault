@@ -1,0 +1,16 @@
+flow: order lifecycle
+description: create → update → delete, reusing the created order's id across tests
+tags: [orders, flow]
+
+# The flow is the isolation unit: DB/Redis reset before stage 1 only.
+reset: once
+
+stages:
+  - test: create order happy path
+    export: [order_id]
+  - test: update order status
+    with: { order_id: "{{ flow.order_id }}" }
+  - test: delete order
+    with: { order_id: "{{ flow.order_id }}" }
+
+on_failure: skip-rest

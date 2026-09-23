@@ -1,0 +1,83 @@
+test: create order happy path
+description: POST /orders charges the card via payments, inserts the order row, warms the cache, emails async
+tags: [orders, smoke]
+timeout: 60s
+
+seed:
+  postgres:
+    - table: users
+      rows: [{ id: 1, email: alice@example.com, status: active, plan: pro }]
+    - table: wallets
+      rows: [{ user_id: 1, balance_cents: 50000, currency: USD }]
+
+mocks:
+  payments:
+    unmatched: fail
+    stubs:
+      - name: charge-ok
+        match:
+          method: POST
+          path: /v1/charges
+          body: { json_partial: { currency: USD } }
+        response:
+          status: 201
+          json: { id: "ch_{{ uuid() }}", status: succeeded }
+          latency: 30ms
+  email:
+    stubs:
+      - name: send-ok
+        match: { method: POST, path: /send }
+        response: { status: 202 }
+
+steps:
+  - name: create
+    request:
+      method: POST
+      path: /api/orders
+      json: { user_id: 1, items: [{ sku: SKU-BOOK, qty: 1, price_cents: 2500 }] }
+    expect:
+      status: 201
+      json_partial: { status: pending, user_id: 1 }
+      jsonpath:
+        - { path: $.id, type: number }
+    capture:
+      order_id: { jsonpath: $.id }
+
+  - name: order visible
+    request: { method: GET, path: "/api/orders/{{ order_id }}" }
+    expect:
+      status: 200
+      json_partial: { id: "{{ order_id }}", total_cents: 2500 }
+    repeat: { every: 200ms, timeout: 5s }
+
+verify:
+  postgres:
+    - table: orders
+      expect:
+        - id: "{{ order_id }}"
+          user_id: 1
+          status: pending
+          total_cents: 2500
+          external_charge_id: { regex: "^ch_" }
+          created_at: !near-now 10s
+      count: exact
+      eventually: 5s
+    - table: wallets
+      expect: [{ user_id: 1, balance_cents: 47500 }]
+  redis:
+    - key: "order:{{ order_id }}:summary"
+      json_partial: { status: pending, total_cents: 2500 }
+      ttl: { gt: 0 }
+  calls:
+    - name: exactly one charge
+      dependency: payments
+      match: { method: POST, path: /v1/charges }
+      body: { json_partial: { amount_cents: 2500, currency: USD, order_ref: "{{ order_id }}" } }
+      count: 1
+    - name: confirmation email
+      dependency: email
+      match: { method: POST, path: /send }
+      count: 1
+  ordered:
+    - [exactly one charge, confirmation email]
+  unexpected: fail

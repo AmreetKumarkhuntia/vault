@@ -1,0 +1,59 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vault_demo
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      VAULT_PG_URL: postgres://postgres:postgres@localhost:5432/vault_demo
+      VAULT_REDIS_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: unit and crate tests
+        run: cargo test --workspace
+
+      - name: build
+        run: cargo build --workspace
+
+      - name: end-to-end suite against demo-target
+        run: |
+          PORT=8091 \
+          DATABASE_URL="$VAULT_PG_URL" \
+          REDIS_URL="$VAULT_REDIS_URL" \
+          PAYMENTS_URL=http://127.0.0.1:9095/payments \
+          EMAIL_URL=http://127.0.0.1:9095/email \
+          ./target/debug/demo-target &
+          ./target/debug/vault run --suite-dir tests -v
+
+      - name: negative showcase must fail with exit 1
+        env:
+          VAULT_RUN_NEGATIVE: ""
+        run: |
+          set +e
+          ./target/debug/vault run --suite-dir tests -t negative
+          code=$?
+          set -e
+          echo "exit code: $code"
+          test "$code" -eq 1

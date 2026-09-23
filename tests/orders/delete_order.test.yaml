@@ -1,0 +1,47 @@
+test: delete order
+description: DELETE refunds via payments, removes the row, audits, clears the cache
+tags: [orders]
+
+vars: { order_id: 901 }
+
+seed:
+  postgres:
+    - table: users
+      conflict: ignore
+      rows: [{ id: 1, email: alice@example.com, status: active }]
+    - table: orders
+      conflict: ignore
+      rows: [{ id: 901, user_id: 1, status: pending, total_cents: 1500 }]
+
+mocks:
+  payments:
+    stubs:
+      - name: refund-ok
+        match: { method: POST, path: /v1/refunds }
+        response: { status: 201, json: { status: refunded } }
+
+steps:
+  - name: remove
+    request: { method: DELETE, path: "/api/orders/{{ vars.order_id }}" }
+    expect: { status: 204 }
+
+verify:
+  postgres:
+    - table: orders
+      expect_absent:
+        - id: "{{ vars.order_id }}"
+    - table: audit_log
+      expect:
+        - entity: order
+          entity_id: { regex: "^{{ vars.order_id }}$" }
+          action: deleted
+  redis:
+    - key: "order:{{ vars.order_id }}:summary"
+      absent: true
+  calls:
+    - name: refund issued
+      dependency: payments
+      match: { method: POST, path: /v1/refunds }
+      body: { json_partial: { order_ref: "{{ vars.order_id }}" } }
+      count: 1
+  unexpected: fail

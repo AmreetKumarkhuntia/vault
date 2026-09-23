@@ -1,0 +1,40 @@
+test: async order confirmation
+description: 202 now, DB write + email ~300ms later — exercises eventually + settle
+tags: [orders, async]
+
+seed:
+  postgres:
+    - table: users
+      conflict: ignore
+      rows: [{ id: 1, email: alice@example.com, status: active }]
+    - table: orders
+      rows: [{ id: 902, user_id: 1, status: pending, total_cents: 700 }]
+
+mocks:
+  email:
+    stubs:
+      - name: send-ok
+        match: { method: POST, path: /send }
+        response: { status: 202 }
+
+steps:
+  - name: confirm
+    request: { method: POST, path: /api/orders/902/confirm-async }
+    expect: { status: 202 }
+
+verify:
+  postgres:
+    - table: orders
+      expect:
+        - id: 902
+          status: confirmed
+      eventually: 5s
+  calls:
+    - name: confirmed email
+      dependency: email
+      match:
+        method: POST
+        path: /send
+        body: { json_partial: { template: order_confirmed, order_ref: 902 } }
+      count: 1
+  unexpected: fail

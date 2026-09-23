@@ -1,0 +1,9 @@
+test: get order not found
+tags: [orders, smoke]
+
+steps:
+  - name: fetch missing order
+    request: { method: GET, path: /api/orders/999999 }
+    expect:
+      status: 404
+      json_partial: { error: order_not_found }

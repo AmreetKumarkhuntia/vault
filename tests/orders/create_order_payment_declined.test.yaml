@@ -1,0 +1,54 @@
+test: create order payment declined
+description: Upstream charge fails — order marked failed, wallet untouched, no email
+tags: [orders]
+
+seed:
+  postgres:
+    - table: users
+      rows: [{ id: 1, email: alice@example.com, status: active }]
+    - table: wallets
+      rows: [{ user_id: 1, balance_cents: 50000, currency: USD }]
+
+mocks:
+  payments:
+    stubs:
+      - name: charge-declined
+        match: { method: POST, path: /v1/charges }
+        response: { status: 500, json: { error: upstream_down } }
+  email:
+    stubs: []
+
+steps:
+  - name: create
+    request:
+      method: POST
+      path: /api/orders
+      json: { user_id: 1, items: [{ sku: SKU-BOOK, qty: 2, price_cents: 1000 }] }
+    expect:
+      status: 502
+      json_partial: { error: payment_failed }
+    capture:
+      order_id: { jsonpath: $.id }
+
+verify:
+  postgres:
+    - table: orders
+      expect:
+        - id: "{{ order_id }}"
+          status: failed
+          external_charge_id: !null
+    - table: wallets
+      expect: [{ user_id: 1, balance_cents: 50000 }]
+  redis:
+    - key: "order:{{ order_id }}:summary"
+      absent: true
+  calls:
+    - name: charge attempted once
+      dependency: payments
+      match: { method: POST, path: /v1/charges }
+      count: 1
+    - name: no email sent
+      dependency: email
+      match: { method: POST, path: /send }
+      count: 0
+  unexpected: fail

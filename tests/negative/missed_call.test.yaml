@@ -1,0 +1,42 @@
+test: missed call demo
+description: Deliberately fails to showcase missed-outbound-call reporting — expects a refund that never happens
+tags: [negative]
+skip: "${env.VAULT_RUN_NEGATIVE:-failure showcase — enable with VAULT_RUN_NEGATIVE=}"
+
+seed:
+  postgres:
+    - table: users
+      rows: [{ id: 1, email: alice@example.com, status: active }]
+    - table: wallets
+      rows: [{ user_id: 1, balance_cents: 50000, currency: USD }]
+
+mocks:
+  payments:
+    stubs:
+      - name: charge-ok
+        match: { method: POST, path: /v1/charges }
+        response: { status: 201, json: { id: "ch_{{ uuid() }}", status: succeeded } }
+      - name: refund-ok
+        match: { method: POST, path: /v1/refunds }
+        response: { status: 201, json: { status: refunded } }
+  email:
+    stubs:
+      - name: send-ok
+        match: { method: POST, path: /send }
+        response: { status: 202 }
+
+steps:
+  - name: create
+    request:
+      method: POST
+      path: /api/orders
+      json: { user_id: 1, items: [{ sku: SKU-BOOK, qty: 1, price_cents: 2500 }] }
+    expect: { status: 201 }
+
+verify:
+  calls:
+    - name: refund that never happens
+      dependency: payments
+      match: { method: POST, path: /v1/refunds }
+      count: 1
+  unexpected: allow

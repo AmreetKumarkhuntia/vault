@@ -1,0 +1,17 @@
+# Backing stores for local development when Postgres/Redis aren't installed.
+# Ports avoid clashing with system installs; point the suite at them with:
+#   export VAULT_PG_URL=postgres://vault:vault@localhost:5433/vault_demo
+#   export VAULT_REDIS_URL=redis://127.0.0.1:6380/15
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: vault
+      POSTGRES_DB: vault_demo
+    ports:
+      - "5433:5432"
+  redis:
+    image: redis:7
+    ports:
+      - "6380:6379"
