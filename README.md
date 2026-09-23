@@ -43,7 +43,7 @@ Per-test lifecycle: `RESET → SEED → ARM MOCKS → RUN STEPS → VERIFY END-S
 ./scripts/demo.sh
 ```
 
-That builds the workspace, starts `examples/demo-target` (a small order service wired at the mock), runs the suite in `tests/`, then runs the deliberately-failing showcase tests so you can see the failure reports.
+That builds the workspace, starts `examples/demo-target` (a small order service wired at the mock), runs the suite in `tests/flows/`, then runs the deliberately-failing showcase tests so you can see the failure reports.
 
 Manual flow:
 
@@ -65,7 +65,7 @@ Exit codes: `0` pass · `1` a test failed · `2` config/usage error · `3` envir
 ## Anatomy of a test
 
 ```yaml
-# tests/orders/create_order.test.yaml
+# tests/flows/orders/create_order.test.yaml
 test: create order happy path
 seed:
   postgres:
@@ -112,7 +112,7 @@ verify:                           # end-state, evaluated after all steps
 ### Flows: use one test's data in the next
 
 ```yaml
-# tests/orders/lifecycle.flow.yaml
+# tests/flows/orders/lifecycle.flow.yaml
 flow: order lifecycle
 reset: once                  # the flow is the isolation unit
 stages:
@@ -141,11 +141,14 @@ crates/
   cli/             the `vault` binary
 examples/
   demo-target/     the order service the e2e suite runs against
-tests/             the YAML suite (vault.yaml config, *.test.yaml, *.flow.yaml)
+tests/
+  code/            Rust tests for the harness code (`cargo test --workspace`)
+  flows/           the YAML suites that test flows: vault.yaml config,
+                   *.test.yaml tests, *.flow.yaml flows, fixtures/
 docs/DESIGN.md     full design document
 ```
 
-Rust tests live in each crate's `tests/` directory; run them with `cargo test --workspace`. The store layer is a trait boundary: adding MySQL or Mongo later is a new driver crate plus one registration line in the CLI — the engine never learns store specifics, because seed/verify blocks are driver-owned documents.
+`vault run` reads `tests/flows` by default (`--suite-dir` overrides). The store layer is a trait boundary: adding MySQL or Mongo later is a new driver crate plus one registration line in the CLI — the engine never learns store specifics, because seed/verify blocks are driver-owned documents.
 
 ## Notes & limitations (v1)
 

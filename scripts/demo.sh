@@ -25,8 +25,8 @@ TARGET_PID=$!
 trap 'kill $TARGET_PID 2>/dev/null || true' EXIT
 
 echo "── running the suite ─────────────────────────────────"
-./target/debug/vault run --suite-dir tests -v
+./target/debug/vault run --suite-dir tests/flows -v
 
 echo
 echo "── failure showcase (exit 1 is the point) ───────────"
-VAULT_RUN_NEGATIVE= ./target/debug/vault run --suite-dir tests -t negative || true
+VAULT_RUN_NEGATIVE= ./target/debug/vault run --suite-dir tests/flows -t negative || true

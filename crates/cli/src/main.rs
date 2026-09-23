@@ -21,7 +21,7 @@ enum Command {
         tag: Vec<String>,
         #[arg(long, default_value = "local")]
         env: String,
-        #[arg(long, default_value = "tests")]
+        #[arg(long, default_value = "tests/flows")]
         suite_dir: String,
         /// Pause at lifecycle boundaries for interactive inspection
         #[arg(long)]
@@ -45,19 +45,19 @@ enum Command {
         pattern: Option<String>,
         #[arg(long, short, action = clap::ArgAction::Append)]
         tag: Vec<String>,
-        #[arg(long, default_value = "tests")]
+        #[arg(long, default_value = "tests/flows")]
         suite_dir: String,
     },
     /// Parse and statically validate the whole suite
     Validate {
-        #[arg(long, default_value = "tests")]
+        #[arg(long, default_value = "tests/flows")]
         suite_dir: String,
     },
     /// Print the environment the target should be started with
     Env {
         #[arg(long, default_value = "local")]
         env: String,
-        #[arg(long, default_value = "tests")]
+        #[arg(long, default_value = "tests/flows")]
         suite_dir: String,
     },
 }

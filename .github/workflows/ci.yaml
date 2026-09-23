@@ -45,14 +45,14 @@ jobs:
           PAYMENTS_URL=http://127.0.0.1:9095/payments \
           EMAIL_URL=http://127.0.0.1:9095/email \
           ./target/debug/demo-target &
-          ./target/debug/vault run --suite-dir tests -v
+          ./target/debug/vault run --suite-dir tests/flows -v
 
       - name: negative showcase must fail with exit 1
         env:
           VAULT_RUN_NEGATIVE: ""
         run: |
           set +e
-          ./target/debug/vault run --suite-dir tests -t negative
+          ./target/debug/vault run --suite-dir tests/flows -t negative
           code=$?
           set -e
           echo "exit code: $code"

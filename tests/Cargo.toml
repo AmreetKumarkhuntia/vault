@@ -1,0 +1,38 @@
+[package]
+name = "vault-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "lib.rs"
+
+# Rust tests for the harness code live in code/; the YAML suites that test
+# flows against a target live in flows/ (run with `vault run`).
+[[test]]
+name = "matchers"
+path = "code/matchers.rs"
+
+[[test]]
+name = "dsl"
+path = "code/dsl.rs"
+
+[[test]]
+name = "mock"
+path = "code/mock.rs"
+
+[[test]]
+name = "engine"
+path = "code/engine.rs"
+
+[dev-dependencies]
+vault-store = { path = "../crates/store" }
+vault-dsl = { path = "../crates/dsl" }
+vault-mock = { path = "../crates/mock" }
+vault-core = { path = "../crates/core" }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+chrono = "0.4"
+indexmap = { version = "2", features = ["serde"] }
