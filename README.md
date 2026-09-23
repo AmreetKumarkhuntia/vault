@@ -1,1 +1,156 @@
 # vault
+
+Black-box HTTP API test harness. Point it at a running server and it controls everything around it: seeds Postgres and Redis before each test, impersonates the server's external dependencies with a recording mock, fires HTTP steps, and verifies responses, database end-state, cache end-state, and every outbound call the server made — all from declarative YAML, no code.
+
+Its signature feature is diagnosability: when an expected insertion is missing, the report names exactly which row, and shows a per-column diff against the closest actual row:
+
+```
+✗ table `orders`: expected row MISSING — id=1, status=confirmed  (after 2015ms, 20 attempts)
+  closest match (score 0.80):
+  │ field         expected                     actual                             │
+  │ created_at    <within 10s of test start>   2026-09-23T10:55:20.783+00:00 ✓    │
+  │ id            1                            1 ✓                                │
+  │ status        confirmed                    pending ✗                          │
+  │ total_cents   2500                         2500 ✓                             │
+```
+
+Missed and unexpected outbound calls get the same treatment: the closest recorded request with component-level diffs.
+
+## How it fits together
+
+```
+                  ┌────────────────────────────────────────┐
+ YAML suites ───▶ │               vault (CLI)              │
+                  │    dsl ─▶ core engine ─▶ report        │
+                  └──────┬──────────┬───────────┬──────────┘
+                  seeds/ │          │ steps     │ serves canned deps,
+                  verify │          │           │ records every request
+                         ▼          ▼           ▼
+                   ┌──────────┐  ┌────────┐  ┌───────────┐
+                   │ Postgres │  │ TARGET │─▶│ mock deps │
+                   │  Redis   │◀─│  (your black box)     │
+                   └──────────┘  └────────┴───────────────┘
+```
+
+The target runs untouched. Its only coupling to vault is configuration: its database DSNs point at the test stores, and its dependency base URLs point at vault's mock listener (`vault env` prints the values to export).
+
+Per-test lifecycle: `RESET → SEED → ARM MOCKS → RUN STEPS → VERIFY END-STATE → REPORT`. Isolation is reset-*before* (TRUNCATE / FLUSHDB), so a crashed run never poisons the next one and failed-test state stays in place for post-mortem.
+
+## Quick start
+
+```sh
+# backing stores: local Postgres + Redis, or `docker compose up -d`
+./scripts/demo.sh
+```
+
+That builds the workspace, starts `examples/demo-target` (a small order service wired at the mock), runs the suite in `tests/`, then runs the deliberately-failing showcase tests so you can see the failure reports.
+
+Manual flow:
+
+```sh
+cargo build --workspace
+vault env                  # print the env the target should start with
+# start your target with those URLs …
+vault validate             # static-check every YAML file, no execution
+vault list                 # resolved run plan
+vault run                  # everything: flows + standalone tests
+vault run 'create order*'  # one test by name/glob
+vault run -t smoke         # filter by tag
+vault run --step           # pause at each lifecycle boundary: resp / vars / calls / db <sql> / redis <cmd>
+vault run --shuffle        # order-independence audit
+```
+
+Exit codes: `0` pass · `1` a test failed · `2` config/usage error · `3` environment/preflight error.
+
+## Anatomy of a test
+
+```yaml
+# tests/orders/create_order.test.yaml
+test: create order happy path
+seed:
+  postgres:
+    - table: users
+      rows: [{ id: 1, email: alice@example.com, status: active }]
+  redis:
+    - set: { key: "session:alice", value: tok_abc, ttl: 600 }
+mocks:
+  payments:                       # target's PAYMENTS_URL → http://<mock>/payments
+    unmatched: fail               # any request no stub matches serves 599 and fails the test
+    stubs:
+      - name: charge-ok
+        match: { method: POST, path: /v1/charges, body: { json_partial: { currency: USD } } }
+        response: { status: 201, json: { id: "ch_{{ uuid() }}", status: succeeded } }
+steps:
+  - name: create
+    request: { method: POST, path: /api/orders, json: { user_id: 1, items: [...] } }
+    expect:  { status: 201, json_partial: { status: pending } }
+    capture: { order_id: { jsonpath: $.id } }       # JSON-typed: numbers stay numbers
+verify:                           # end-state, evaluated after all steps
+  postgres:
+    - table: orders
+      expect:
+        - id: "{{ order_id }}"
+          status: pending
+          external_charge_id: { regex: "^ch_" }     # matchers: regex, gt/gte/lt/lte, one_of …
+          created_at: !near-now 10s                 # tags: !any !uuid !null !not-null !iso8601 …
+      count: exact                # extra rows in this key-space fail the test
+      eventually: 5s              # bounded polling for async writers (+ settle for negatives)
+  redis:
+    - key: "order:{{ order_id }}:summary"
+      json_partial: { status: pending }
+      ttl: { gt: 0 }
+  calls:                          # what the TARGET sent to its dependencies
+    - name: exactly one charge
+      dependency: payments
+      match: { method: POST, path: /v1/charges }
+      body: { json_partial: { order_ref: "{{ order_id }}" } }
+      count: 1                    # also {gte: n}, {lte: n}; 0 = "never called"
+  ordered: [[exactly one charge, confirmation email]]
+  unexpected: fail                # unplanned traffic to mocked deps fails the test
+```
+
+### Flows: use one test's data in the next
+
+```yaml
+# tests/orders/lifecycle.flow.yaml
+flow: order lifecycle
+reset: once                  # the flow is the isolation unit
+stages:
+  - test: create order happy path
+    export: [order_id]       # promote captures into flow scope
+  - test: update order status
+    with: { order_id: "{{ flow.order_id }}" }
+  - test: delete order
+    with: { order_id: "{{ flow.order_id }}" }
+on_failure: skip-rest        # a failed stage marks the rest SKIPPED, never silent green
+```
+
+Referenced tests stay independently runnable (their `vars:` provide defaults; `with:` overrides). A `{{ flow.* }}` reference no earlier stage exports is a static validation error.
+
+## Repository layout
+
+```
+crates/
+  dsl/             YAML schema, parsing (!tag matchers), static validation
+  store/           StateStore trait boundary, outcome types, shared matcher vocabulary
+  store-postgres/  sqlx driver: seed / TRUNCATE reset / near-miss verification / watch
+  store-redis/     redis driver: seed / FLUSHDB reset / typed key verification
+  mock/            recording mock server + outbound-call verification (bipartite matching)
+  core/            engine: lifecycle, templating (minijinja), captures, eventually/settle, flows
+  report/          pretty terminal / JSON / JUnit renderers (same structs, lossless)
+  cli/             the `vault` binary
+examples/
+  demo-target/     the order service the e2e suite runs against
+tests/             the YAML suite (vault.yaml config, *.test.yaml, *.flow.yaml)
+docs/DESIGN.md     full design document
+```
+
+Rust tests live in each crate's `tests/` directory; run them with `cargo test --workspace`. The store layer is a trait boundary: adding MySQL or Mongo later is a new driver crate plus one registration line in the CLI — the engine never learns store specifics, because seed/verify blocks are driver-owned documents.
+
+## Notes & limitations (v1)
+
+- Execution is serial by design: one target, one database. The session abstractions reserve hooks for parallel lanes.
+- Transaction-rollback isolation is impossible for a black-box target (it owns its own connections) — that's why isolation is TRUNCATE-based and documented as such.
+- Redis verification requires a dedicated logical DB (e.g. `/15`); the driver refuses db 0 without `allow_db0: true`.
+- The target's in-process caches don't reset with the DB; if your server has a reset endpoint, call it via a seed `sql:`-style hook or an extra step.
+- `skip: "${env.FLAG:-reason}"` gates a test on an environment variable — an empty value means "run it" (see `tests/negative/`).
