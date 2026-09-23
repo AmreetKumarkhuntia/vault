@@ -1,0 +1,167 @@
+# The whole release pipeline lives in one workflow: tags/releases created with
+# GITHUB_TOKEN do not trigger other workflows, so a separate `on: release`
+# build would silently never run.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild/upload assets for (e.g. v0.2.0). Empty = dry-run build of HEAD, no upload."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      prs_created: ${{ steps.rp.outputs.prs_created }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # release-please bumps Cargo.toml via the version annotation but cannot
+  # write Cargo.lock; cargo itself syncs it inside the release PR so the
+  # `--locked` release build stays honest.
+  sync-lockfile:
+    needs: release-please
+    if: needs.release-please.outputs.prs_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release-please--branches--main
+      - uses: dtolnay/rust-toolchain@stable
+      - name: sync workspace member versions into Cargo.lock
+        run: cargo update --workspace
+      - name: push lockfile to release PR if changed
+        run: |
+          if ! git diff --quiet -- Cargo.lock; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: sync Cargo.lock with release version"
+            git push origin HEAD:release-please--branches--main
+          fi
+
+  build:
+    needs: release-please
+    if: >-
+      !cancelled() && (
+        github.event_name == 'workflow_dispatch' ||
+        needs.release-please.outputs.release_created == 'true'
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name || 'v0.0.0-dev' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: build
+        run: cargo build --release --locked -p vault --target ${{ matrix.target }}
+      - name: smoke test
+        run: ./target/${{ matrix.target }}/release/vault --version
+      - name: package
+        run: |
+          NAME="vault-${TAG}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+          cp "target/${{ matrix.target }}/release/vault" README.md LICENSE "dist/${NAME}/"
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+          (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  upload-assets:
+    needs: [release-please, build]
+    if: >-
+      !cancelled() && needs.build.result == 'success' && (
+        needs.release-please.outputs.release_created == 'true' ||
+        inputs.tag != ''
+      )
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: aggregate SHA256SUMS and upload
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          gh release upload "$TAG" *.tar.gz SHA256SUMS --clobber
+
+  npm-publish:
+    needs: [release-please, upload-assets]
+    if: >-
+      !cancelled() && needs.upload-assets.result == 'success' && (
+        needs.release-please.outputs.release_created == 'true' ||
+        inputs.tag != ''
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: publish npm wrapper
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret not set; skipping npm publish."
+            exit 0
+          fi
+          npm version "${TAG#v}" --no-git-tag-version
+          npm publish --access public --provenance
