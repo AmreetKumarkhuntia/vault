@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dsl",
+    "crates/store",
+    "crates/store-postgres",
+    "crates/store-redis",
+    "crates/mock",
+    "crates/core",
+    "crates/report",
+    "crates/cli",
+    "examples/demo-target",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/AmreetKumarkhuntia/vault"
+
+[profile.dev]
+debug = 0

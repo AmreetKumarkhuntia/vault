@@ -1,0 +1,29 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+globset = "0.4.20"
+owo-colors = "4.4.0"
+rand = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml_ng = "0.10.0"
+vault-core = { path = "../core" }
+vault-dsl = { path = "../dsl" }
+vault-mock = { path = "../mock" }
+vault-report = { path = "../report" }
+vault-store = { path = "../store" }
+vault-store-postgres = { path = "../store-postgres" }
+vault-store-redis = { path = "../store-redis" }
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+indexmap = "2.14.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
