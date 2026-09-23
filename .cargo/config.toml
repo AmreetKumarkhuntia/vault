@@ -1,0 +1,6 @@
+[alias]
+# cargo suite [-- -t smoke]   → run the YAML flow suite (target must be up: make target-start)
+suite = "run -q -p vault -- run"
+suite-list = "run -q -p vault -- list"
+suite-validate = "run -q -p vault -- validate"
+suite-env = "run -q -p vault -- env"

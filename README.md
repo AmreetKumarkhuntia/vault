@@ -39,13 +39,25 @@ Per-test lifecycle: `RESET → SEED → ARM MOCKS → RUN STEPS → VERIFY END-S
 ## Quick start
 
 ```sh
-# backing stores: local Postgres + Redis, or `docker compose up -d`
-./scripts/demo.sh
+# backing stores: local Postgres + Redis, or `make stores-up` (docker, ports 5433/6380)
+make demo        # full guided demo: build, start demo-target, suite, failure showcase
 ```
 
-That builds the workspace, starts `examples/demo-target` (a small order service wired at the mock), runs the suite in `tests/flows/`, then runs the deliberately-failing showcase tests so you can see the failure reports.
+Day-to-day commands (`make help` lists all):
 
-Manual flow:
+```sh
+make test        # Rust tests for the harness code (tests/code)
+make suite       # start demo-target, run the YAML flow suite, stop it
+make suite ARGS='-t smoke -v'
+make negative    # the deliberately-failing showcase (exit 1 is the point)
+make test-all    # test + suite + negative
+make validate    # static-check every YAML file
+make target-start / target-stop   # manage demo-target yourself
+```
+
+Cargo aliases work too once the target is up: `cargo suite`, `cargo suite-list`, `cargo suite-validate`, `cargo suite-env`.
+
+Manual flow against your own server:
 
 ```sh
 cargo build --workspace
