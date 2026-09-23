@@ -44,8 +44,10 @@ fn load_suite(suite_dir: &str) -> Result<Suite, i32> {
 }
 
 fn validate_all(suite: &Suite, reg: &StoreRegistry) -> Vec<String> {
-    let mut issues: Vec<String> =
-        vault_dsl::validate_suite(suite).into_iter().map(|i| i.to_string()).collect();
+    let mut issues: Vec<String> = vault_dsl::validate_suite(suite)
+        .into_iter()
+        .map(|i| i.to_string())
+        .collect();
 
     for t in &suite.tests {
         let origin = t.path.display().to_string();
@@ -93,8 +95,12 @@ fn plan<'s>(suite: &'s Suite, pattern: &Option<String>, tags: &[String]) -> Resu
         }
         None => None,
     };
-    let name_matches =
-        |name: &str| matcher.as_ref().map(|m| m.is_match(name) || name == pattern.as_deref().unwrap_or("")).unwrap_or(true);
+    let name_matches = |name: &str| {
+        matcher
+            .as_ref()
+            .map(|m| m.is_match(name) || name == pattern.as_deref().unwrap_or(""))
+            .unwrap_or(true)
+    };
     let tags_match = |t: &[String]| tags.iter().all(|want| t.contains(want));
 
     let in_flows: HashSet<&str> = suite
@@ -183,7 +189,10 @@ pub fn print_env(env: String, suite_dir: String) -> i32 {
         Err(c) => return c,
     };
     let Some(environment) = suite.config.environments.get(&env) else {
-        eprintln!("{} unknown environment `{env}`", "config error:".red().bold());
+        eprintln!(
+            "{} unknown environment `{env}`",
+            "config error:".red().bold()
+        );
         return 2;
     };
     let bind = &environment.mock_server.bind;
@@ -224,15 +233,25 @@ pub fn run(args: RunArgs) -> i32 {
         for i in &issues {
             eprintln!("{} {i}", "✗".red());
         }
-        eprintln!("\n{} suite invalid — nothing was executed", "config error:".red().bold());
+        eprintln!(
+            "\n{} suite invalid — nothing was executed",
+            "config error:".red().bold()
+        );
         return 2;
     }
     let Some(environment) = suite.config.environments.get(&args.env).cloned() else {
-        eprintln!("{} unknown environment `{}`", "config error:".red().bold(), args.env);
+        eprintln!(
+            "{} unknown environment `{}`",
+            "config error:".red().bold(),
+            args.env
+        );
         return 2;
     };
     if args.step && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        eprintln!("{} --step needs an interactive terminal", "usage error:".red().bold());
+        eprintln!(
+            "{} --step needs an interactive terminal",
+            "usage error:".red().bold()
+        );
         return 2;
     }
 
@@ -249,11 +268,17 @@ async fn run_async(
     let mut stores: IndexMap<String, Arc<dyn vault_store::StateStore>> = IndexMap::new();
     for (kind, cfg) in &environment.stores {
         let Some(driver) = reg.get(kind) else {
-            eprintln!("{} no driver for store `{kind}`", "config error:".red().bold());
+            eprintln!(
+                "{} no driver for store `{kind}`",
+                "config error:".red().bold()
+            );
             return 2;
         };
-        let mut options: serde_json::Map<String, Value> =
-            cfg.options.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut options: serde_json::Map<String, Value> = cfg
+            .options
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         options.insert("suite_root".into(), json!(suite.root.display().to_string()));
         let conn = StoreConnConfig {
             alias: kind.clone(),
@@ -304,8 +329,11 @@ async fn run_async(
         abort_run: std::sync::atomic::AtomicBool::new(false),
     };
 
-    let tests_by_name: HashMap<String, &vault_dsl::TestDef> =
-        suite.tests.iter().map(|t| (t.def.test.clone(), &t.def)).collect();
+    let tests_by_name: HashMap<String, &vault_dsl::TestDef> = suite
+        .tests
+        .iter()
+        .map(|t| (t.def.test.clone(), &t.def))
+        .collect();
 
     enum Item<'s> {
         Test(&'s vault_dsl::LoadedTest),

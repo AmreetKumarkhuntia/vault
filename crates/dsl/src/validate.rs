@@ -112,7 +112,10 @@ fn validate_test(def: &TestDef, origin: &str, issues: &mut Vec<ValidationIssue>)
             }),
             (Some(_), Some(_)) => issues.push(ValidationIssue {
                 origin: origin.into(),
-                message: format!("steps[{i}] `{}`: request has both `path` and `url`", step.name),
+                message: format!(
+                    "steps[{i}] `{}`: request has both `path` and `url`",
+                    step.name
+                ),
             }),
             _ => {}
         }
@@ -170,8 +173,13 @@ fn validate_test(def: &TestDef, origin: &str, issues: &mut Vec<ValidationIssue>)
     }
 
     // ordered: groups must reference call expectation labels.
-    let labels: HashSet<String> =
-        def.verify.calls.iter().enumerate().map(|(i, c)| c.label(i)).collect();
+    let labels: HashSet<String> = def
+        .verify
+        .calls
+        .iter()
+        .enumerate()
+        .map(|(i, c)| c.label(i))
+        .collect();
     for (gi, group) in def.verify.ordered.iter().enumerate() {
         for name in group {
             if !labels.contains(name) {

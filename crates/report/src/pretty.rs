@@ -31,10 +31,21 @@ fn print_test(test: &TestResult, verbose: bool) {
         .unwrap_or_default();
     match test.status {
         TestStatus::Passed => {
-            println!("{} {}{} ({}ms)", "✓".green().bold(), flow_prefix, test.name, test.duration_ms);
+            println!(
+                "{} {}{} ({}ms)",
+                "✓".green().bold(),
+                flow_prefix,
+                test.name,
+                test.duration_ms
+            );
             if verbose {
                 for step in &test.steps {
-                    println!("    {} step {} ({} attempts)", "✓".green(), step.name, step.attempts);
+                    println!(
+                        "    {} step {} ({} attempts)",
+                        "✓".green(),
+                        step.name,
+                        step.attempts
+                    );
                 }
             }
         }
@@ -48,16 +59,32 @@ fn print_test(test: &TestResult, verbose: bool) {
             );
         }
         TestStatus::Errored => {
-            println!("{} {}{} ({}ms)", "⚠".yellow().bold(), flow_prefix, test.name, test.duration_ms);
+            println!(
+                "{} {}{} ({}ms)",
+                "⚠".yellow().bold(),
+                flow_prefix,
+                test.name,
+                test.duration_ms
+            );
             if let Some(e) = &test.error {
                 println!("    {}", e.yellow());
             }
         }
         TestStatus::Failed => {
-            println!("{} {}{} ({}ms)", "✗".red().bold(), flow_prefix, test.name, test.duration_ms);
+            println!(
+                "{} {}{} ({}ms)",
+                "✗".red().bold(),
+                flow_prefix,
+                test.name,
+                test.duration_ms
+            );
             for step in &test.steps {
                 let ok = step.status == TestStatus::Passed;
-                let glyph = if ok { "✓".green().to_string() } else { "✗".red().to_string() };
+                let glyph = if ok {
+                    "✓".green().to_string()
+                } else {
+                    "✗".red().to_string()
+                };
                 println!("    {glyph} step {}", step.name);
                 for f in step.checks.failures() {
                     print_failure(f, 6);
@@ -77,7 +104,12 @@ fn print_failure(f: &CheckFailure, indent: usize) {
     } else {
         String::new()
     };
-    println!("{pad}{} {}{}", "✗".red(), f.description.red(), attempts.dimmed());
+    println!(
+        "{pad}{} {}{}",
+        "✗".red(),
+        f.description.red(),
+        attempts.dimmed()
+    );
     println!("{pad}  {} {}", "at".dimmed(), f.yaml_path.dimmed());
 
     match &f.kind {
@@ -94,11 +126,28 @@ fn print_failure(f: &CheckFailure, indent: usize) {
         }
         FailureKind::MissedCall { .. } if !f.near_misses.is_empty() => {
             let best = &f.near_misses[0];
-            let method = best.actual.pointer("/request/method").and_then(|v| v.as_str()).unwrap_or("?");
-            let path = best.actual.pointer("/request/path").and_then(|v| v.as_str()).unwrap_or("?");
-            let body = best.actual.pointer("/request/body").and_then(|v| v.as_str()).unwrap_or("");
+            let method = best
+                .actual
+                .pointer("/request/method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let path = best
+                .actual
+                .pointer("/request/path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let body = best
+                .actual
+                .pointer("/request/body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             println!("{pad}  closest recorded call (score {:.2}):", best.score);
-            println!("{pad}    {} {} {}", method, path, truncate(body, 200).dimmed());
+            println!(
+                "{pad}    {} {} {}",
+                method,
+                path,
+                truncate(body, 200).dimmed()
+            );
             if !best.diffs.is_empty() {
                 let mut table = diff_table();
                 for d in best.diffs.iter().take(10) {
@@ -113,14 +162,15 @@ fn print_failure(f: &CheckFailure, indent: usize) {
         }
         FailureKind::MissingRow if !f.near_misses.is_empty() => {
             let best = &f.near_misses[0];
-            println!(
-                "{pad}  closest match (score {:.2}):",
-                best.score
-            );
+            println!("{pad}  closest match (score {:.2}):", best.score);
             let mut table = diff_table();
             if let Some(exp) = f.expected.as_object() {
                 for (col, want) in exp {
-                    let got = best.actual.get(col).cloned().unwrap_or(serde_json::Value::Null);
+                    let got = best
+                        .actual
+                        .get(col)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     let matched = !best.diffs.iter().any(|d| d.path == *col);
                     let mark = if matched { "✓" } else { "✗" };
                     table.add_row(vec![
@@ -133,12 +183,27 @@ fn print_failure(f: &CheckFailure, indent: usize) {
             indent_print(&table, indent + 2);
         }
         FailureKind::UnexpectedCall { exchange } => {
-            let method = exchange.pointer("/request/method").and_then(|v| v.as_str()).unwrap_or("?");
-            let path = exchange.pointer("/request/path").and_then(|v| v.as_str()).unwrap_or("?");
-            let body = exchange.pointer("/request/body").and_then(|v| v.as_str()).unwrap_or("");
-            println!("{pad}  {} {} {}", method, path, truncate(body, 200).dimmed());
+            let method = exchange
+                .pointer("/request/method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let path = exchange
+                .pointer("/request/path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let body = exchange
+                .pointer("/request/body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            println!(
+                "{pad}  {} {} {}",
+                method,
+                path,
+                truncate(body, 200).dimmed()
+            );
         }
-        FailureKind::UnexpectedRow { actual } | FailureKind::UnexpectedChange { after: actual, .. } => {
+        FailureKind::UnexpectedRow { actual }
+        | FailureKind::UnexpectedChange { after: actual, .. } => {
             println!("{pad}  row: {}", truncate(&actual.to_string(), 300));
         }
         FailureKind::CountMismatch { expected, actual } => {

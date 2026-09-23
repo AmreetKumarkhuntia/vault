@@ -35,9 +35,18 @@ fn full_match_requires_every_component() {
         "body": { "json_partial": { "currency": "USD" } }
     }))
     .unwrap();
-    assert!(request_matches(&spec, &req("POST", "/v1/charges", json!({"currency":"USD","x":1}))));
-    assert!(!request_matches(&spec, &req("POST", "/v1/charges", json!({"currency":"EUR"}))));
-    assert!(!request_matches(&spec, &req("GET", "/v1/charges", json!({"currency":"USD"}))));
+    assert!(request_matches(
+        &spec,
+        &req("POST", "/v1/charges", json!({"currency":"USD","x":1}))
+    ));
+    assert!(!request_matches(
+        &spec,
+        &req("POST", "/v1/charges", json!({"currency":"EUR"}))
+    ));
+    assert!(!request_matches(
+        &spec,
+        &req("GET", "/v1/charges", json!({"currency":"USD"}))
+    ));
 }
 
 #[test]
@@ -85,12 +94,30 @@ fn expect(name: &str, dep: &str, method: &str, path: &str, count: Value) -> Call
 
 #[test]
 fn missed_call_reports_near_miss() {
-    let r = report(vec![rec(0, "payments", "POST", "/v1/refunds", json!({}))], &["payments"]);
-    let calls = vec![expect("charge", "payments", "POST", "/v1/charges", json!(1))];
-    let out = verify_calls(&r, &calls, &[], &UnmatchedPolicy::Allow, &MatchCtx::default());
+    let r = report(
+        vec![rec(0, "payments", "POST", "/v1/refunds", json!({}))],
+        &["payments"],
+    );
+    let calls = vec![expect(
+        "charge",
+        "payments",
+        "POST",
+        "/v1/charges",
+        json!(1),
+    )];
+    let out = verify_calls(
+        &r,
+        &calls,
+        &[],
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
     let fails: Vec<_> = out.failures().collect();
     assert_eq!(fails.len(), 1);
-    assert!(matches!(fails[0].kind, FailureKind::MissedCall { satisfied: 0 }));
+    assert!(matches!(
+        fails[0].kind,
+        FailureKind::MissedCall { satisfied: 0 }
+    ));
     assert!(!fails[0].near_misses.is_empty());
 }
 
@@ -107,16 +134,30 @@ fn overlapping_expectations_use_bipartite_not_greedy() {
     specific.body = Some(json!({"json_partial": {"to": "a@x"}}));
     let broad = expect("broad", "email", "POST", "/send", json!(1));
     // Broad listed first: greedy would give it recording 0 and starve specific.
-    let out =
-        verify_calls(&r, &[broad, specific], &[], &UnmatchedPolicy::Allow, &MatchCtx::default());
+    let out = verify_calls(
+        &r,
+        &[broad, specific],
+        &[],
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
     assert!(out.passed(), "{:?}", out.failures().collect::<Vec<_>>());
 }
 
 #[test]
 fn count_zero_means_never_called() {
-    let r = report(vec![rec(0, "email", "POST", "/send", json!({}))], &["email"]);
+    let r = report(
+        vec![rec(0, "email", "POST", "/send", json!({}))],
+        &["email"],
+    );
     let calls = vec![expect("no emails", "email", "POST", "/send", json!(0))];
-    let out = verify_calls(&r, &calls, &[], &UnmatchedPolicy::Allow, &MatchCtx::default());
+    let out = verify_calls(
+        &r,
+        &calls,
+        &[],
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
     let fails: Vec<_> = out.failures().collect();
     assert_eq!(fails.len(), 1);
     assert!(matches!(fails[0].kind, FailureKind::CountMismatch { .. }));
@@ -124,7 +165,10 @@ fn count_zero_means_never_called() {
 
 #[test]
 fn unexpected_calls_fail_when_policy_is_fail() {
-    let r = report(vec![rec(0, "email", "POST", "/send", json!({}))], &["email"]);
+    let r = report(
+        vec![rec(0, "email", "POST", "/send", json!({}))],
+        &["email"],
+    );
     let out = verify_calls(&r, &[], &[], &UnmatchedPolicy::Fail, &MatchCtx::default());
     let fails: Vec<_> = out.failures().collect();
     assert_eq!(fails.len(), 1);
@@ -145,10 +189,24 @@ fn ordered_group_checks_subsequence() {
         expect("mail", "email", "POST", "/send", json!(1)),
     ];
     let bad = vec![vec!["charge".to_string(), "mail".to_string()]];
-    let out = verify_calls(&r, &calls, &bad, &UnmatchedPolicy::Allow, &MatchCtx::default());
-    assert!(out.failures().any(|f| matches!(f.kind, FailureKind::OrderViolation { .. })));
+    let out = verify_calls(
+        &r,
+        &calls,
+        &bad,
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
+    assert!(out
+        .failures()
+        .any(|f| matches!(f.kind, FailureKind::OrderViolation { .. })));
 
     let good = vec![vec!["mail".to_string(), "charge".to_string()]];
-    let out = verify_calls(&r, &calls, &good, &UnmatchedPolicy::Allow, &MatchCtx::default());
+    let out = verify_calls(
+        &r,
+        &calls,
+        &good,
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
     assert!(out.passed());
 }

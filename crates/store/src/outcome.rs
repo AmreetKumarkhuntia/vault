@@ -11,7 +11,9 @@ pub struct VerifyOutcome {
 
 impl VerifyOutcome {
     pub fn passed(&self) -> bool {
-        self.checks.iter().all(|c| matches!(c, CheckResult::Pass { .. }))
+        self.checks
+            .iter()
+            .all(|c| matches!(c, CheckResult::Pass { .. }))
     }
     pub fn failures(&self) -> impl Iterator<Item = &CheckFailure> {
         self.checks.iter().filter_map(|c| match c {
@@ -20,7 +22,9 @@ impl VerifyOutcome {
         })
     }
     pub fn push_pass(&mut self, description: impl Into<String>) {
-        self.checks.push(CheckResult::Pass { description: description.into() });
+        self.checks.push(CheckResult::Pass {
+            description: description.into(),
+        });
     }
     pub fn merge(&mut self, other: VerifyOutcome) {
         self.checks.extend(other.checks);
@@ -73,15 +77,33 @@ impl CheckFailure {
 pub enum FailureKind {
     /// The headline feature: an expected insertion that never happened.
     MissingRow,
-    UnexpectedRow { actual: Value },
-    UnexpectedChange { before: Value, after: Value },
-    ValueMismatch { diffs: Vec<FieldDiff> },
+    UnexpectedRow {
+        actual: Value,
+    },
+    UnexpectedChange {
+        before: Value,
+        after: Value,
+    },
+    ValueMismatch {
+        diffs: Vec<FieldDiff>,
+    },
     MissingKey,
-    UnexpectedKey { key: String },
-    CountMismatch { expected: String, actual: u64 },
-    MissedCall { satisfied: u64 },
-    UnexpectedCall { exchange: Value },
-    OrderViolation { interleaving: Vec<(String, u64)> },
+    UnexpectedKey {
+        key: String,
+    },
+    CountMismatch {
+        expected: String,
+        actual: u64,
+    },
+    MissedCall {
+        satisfied: u64,
+    },
+    UnexpectedCall {
+        exchange: Value,
+    },
+    OrderViolation {
+        interleaving: Vec<(String, u64)>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

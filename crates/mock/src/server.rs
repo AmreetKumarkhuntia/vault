@@ -9,8 +9,8 @@ use axum::Router;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
-use crate::session::{resolve_dep, response_for, Session, SessionGuard};
 use crate::record::{RecordedExchange, RecordedRequest};
+use crate::session::{resolve_dep, response_for, Session, SessionGuard};
 use crate::UNMATCHED_STATUS;
 
 type Active = Arc<Mutex<Option<Arc<Session>>>>;
@@ -34,7 +34,9 @@ impl MockServer {
         let listener = tokio::net::TcpListener::bind(bind)
             .await
             .map_err(|e| MockError::Bind(bind.to_string(), e))?;
-        let addr = listener.local_addr().map_err(|e| MockError::Bind(bind.to_string(), e))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| MockError::Bind(bind.to_string(), e))?;
         let app = Router::new().fallback(handle).with_state(active.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -49,7 +51,11 @@ impl MockServer {
     pub fn arm(&self, session: Session) -> SessionGuard {
         let session = Arc::new(session);
         *self.active.lock() = Some(session.clone());
-        SessionGuard { active: self.active.clone(), session, base_url: self.base_url() }
+        SessionGuard {
+            active: self.active.clone(),
+            session,
+            base_url: self.base_url(),
+        }
     }
 }
 
@@ -71,7 +77,10 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
     let body_json = serde_json::from_str(&body).unwrap_or(Value::Null);
 
     let Some(session) = active.lock().clone() else {
-        return plain(UNMATCHED_STATUS, json!({"error": "vault-mock: no active session"}));
+        return plain(
+            UNMATCHED_STATUS,
+            json!({"error": "vault-mock: no active session"}),
+        );
     };
 
     let Some((dep, rel_path)) = resolve_dep(&session, &path) else {
@@ -79,7 +88,14 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
             seq: 0,
             at_unix_ms: now_ms(),
             dependency: "<unknown>".into(),
-            request: RecordedRequest { method, path, query, headers, body, body_json },
+            request: RecordedRequest {
+                method,
+                path,
+                query,
+                headers,
+                body,
+                body_json,
+            },
             matched_stub: None,
             responded_status: UNMATCHED_STATUS,
         });
@@ -90,7 +106,14 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
     };
     let dep_name = dep.name.clone();
 
-    let recorded = RecordedRequest { method, path: rel_path, query, headers, body, body_json };
+    let recorded = RecordedRequest {
+        method,
+        path: rel_path,
+        query,
+        headers,
+        body,
+        body_json,
+    };
 
     for stub in &dep.stubs {
         if let Some(times) = stub.spec.times {
@@ -102,7 +125,9 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
             continue;
         }
         let serve_index = stub.served.fetch_add(1, Ordering::SeqCst);
-        let Some(resp) = response_for(stub, serve_index) else { continue };
+        let Some(resp) = response_for(stub, serve_index) else {
+            continue;
+        };
 
         let path_params = stub
             .spec
@@ -148,7 +173,7 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
 fn render_response(resp: &Value, req: &RecordedRequest, path_params: &Value) -> Value {
     let mut env = minijinja::Environment::new();
     env.add_function("uuid", || uuid::Uuid::new_v4().to_string());
-    env.add_function("now", || chrono_now());
+    env.add_function("now", chrono_now);
     let ctx = json!({
         "request": {
             "path": req.path,
@@ -163,17 +188,17 @@ fn render_response(resp: &Value, req: &RecordedRequest, path_params: &Value) -> 
 
 fn render_strings(v: &Value, env: &minijinja::Environment, ctx: &Value) -> Value {
     match v {
-        Value::String(s) if s.contains("{{") => {
-            match env.render_str(s, ctx) {
-                Ok(out) => Value::String(out),
-                Err(_) => v.clone(),
-            }
-        }
+        Value::String(s) if s.contains("{{") => match env.render_str(s, ctx) {
+            Ok(out) => Value::String(out),
+            Err(_) => v.clone(),
+        },
         Value::Array(items) => {
             Value::Array(items.iter().map(|i| render_strings(i, env, ctx)).collect())
         }
         Value::Object(m) => Value::Object(
-            m.iter().map(|(k, val)| (k.clone(), render_strings(val, env, ctx))).collect(),
+            m.iter()
+                .map(|(k, val)| (k.clone(), render_strings(val, env, ctx)))
+                .collect(),
         ),
         other => other.clone(),
     }
@@ -181,7 +206,10 @@ fn render_strings(v: &Value, env: &minijinja::Environment, ctx: &Value) -> Value
 
 fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
     format!("{ms}")
 }
 
@@ -205,7 +233,9 @@ fn build_response(rendered: &Value) -> Response {
     } else {
         rendered["body"].as_str().unwrap_or("").to_string()
     };
-    builder.body(Body::from(body)).unwrap_or_else(|_| plain(500, json!({"error": "bad stub"})))
+    builder
+        .body(Body::from(body))
+        .unwrap_or_else(|_| plain(500, json!({"error": "bad stub"})))
 }
 
 fn plain(status: u16, body: Value) -> Response {
@@ -259,5 +289,8 @@ fn url_decode(s: &str) -> String {
 
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }

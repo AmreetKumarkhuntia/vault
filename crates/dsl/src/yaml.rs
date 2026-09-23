@@ -60,8 +60,12 @@ fn yaml_scalar_to_string(v: &Yaml) -> String {
 pub fn interpolate_env(raw: &str) -> String {
     let mut s = raw.to_string();
     for _ in 0..8 {
-        let Some(start) = s.rfind("${env.") else { break };
-        let Some(end_rel) = s[start + 6..].find('}') else { break };
+        let Some(start) = s.rfind("${env.") else {
+            break;
+        };
+        let Some(end_rel) = s[start + 6..].find('}') else {
+            break;
+        };
         let expr = &s[start + 6..start + 6 + end_rel];
         let (name, default) = match expr.split_once(":-") {
             Some((n, d)) => (n, Some(d.to_string())),

@@ -63,7 +63,9 @@ pub struct MockServerCfg {
 
 impl Default for MockServerCfg {
     fn default() -> Self {
-        Self { bind: default_mock_bind() }
+        Self {
+            bind: default_mock_bind(),
+        }
     }
 }
 
@@ -104,7 +106,10 @@ pub struct RequestDefaults {
 
 impl Default for RequestDefaults {
     fn default() -> Self {
-        Self { timeout: default_request_timeout(), headers: IndexMap::new() }
+        Self {
+            timeout: default_request_timeout(),
+            headers: IndexMap::new(),
+        }
     }
 }
 
@@ -138,7 +143,10 @@ pub struct VerifyDefaults {
 
 impl Default for VerifyDefaults {
     fn default() -> Self {
-        Self { settle: default_settle(), poll_interval: default_poll() }
+        Self {
+            settle: default_settle(),
+            poll_interval: default_poll(),
+        }
     }
 }
 

@@ -41,7 +41,9 @@ pub fn component_score(spec: &MatchSpec, req: &RecordedRequest) -> u32 {
         let hdrs = req.headers.as_object();
         let all = spec.headers.iter().all(|(k, v)| {
             let actual = hdrs.and_then(|h| {
-                h.iter().find(|(hk, _)| hk.eq_ignore_ascii_case(k)).map(|(_, hv)| hv)
+                h.iter()
+                    .find(|(hk, _)| hk.eq_ignore_ascii_case(k))
+                    .map(|(_, hv)| hv)
             });
             match v.as_str() {
                 Some("*") => actual.is_some(),
@@ -88,7 +90,9 @@ pub fn path_matches(spec: &Value, actual: &str) -> Option<Value> {
     match spec {
         Value::String(pattern) => {
             if let Some(prefix) = pattern.strip_suffix("/**") {
-                return actual.starts_with(prefix).then(|| Value::Object(Default::default()));
+                return actual
+                    .starts_with(prefix)
+                    .then(|| Value::Object(Default::default()));
             }
             let pat_segs: Vec<&str> = pattern.trim_matches('/').split('/').collect();
             let act_segs: Vec<&str> = actual.trim_matches('/').split('/').collect();
@@ -127,7 +131,9 @@ pub fn body_matches(spec: &Value, req: &RecordedRequest, ctx: &MatchCtx) -> bool
             return matchers::json_exact(exact, &req.body_json, &[], ctx).is_empty();
         }
         if let Some(re) = m.get("regex").and_then(|r| r.as_str()) {
-            return regex::Regex::new(re).map(|r| r.is_match(&req.body)).unwrap_or(false);
+            return regex::Regex::new(re)
+                .map(|r| r.is_match(&req.body))
+                .unwrap_or(false);
         }
         // Literal object: containment semantics.
         return matchers::json_contains(spec, &req.body_json, ctx).is_empty();
@@ -143,7 +149,13 @@ fn loose_eq(expected: &Value, actual: &Value) -> bool {
         return true;
     }
     // Query params arrive as strings; compare textually.
-    let e = expected.as_str().map(String::from).unwrap_or_else(|| expected.to_string());
-    let a = actual.as_str().map(String::from).unwrap_or_else(|| actual.to_string());
+    let e = expected
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| expected.to_string());
+    let a = actual
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| actual.to_string());
     e == a
 }

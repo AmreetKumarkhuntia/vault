@@ -2,7 +2,9 @@ use serde_json::{json, Value};
 use vault_store::matchers::*;
 
 fn ctx() -> MatchCtx {
-    MatchCtx { anchor_unix_ms: 1_700_000_000_000 }
+    MatchCtx {
+        anchor_unix_ms: 1_700_000_000_000,
+    }
 }
 
 #[test]
@@ -10,25 +12,61 @@ fn literal_and_operator_matching() {
     assert!(matches_value(&json!(5), Some(&json!(5)), &ctx()));
     assert!(matches_value(&json!(5), Some(&json!(5.0)), &ctx()));
     assert!(!matches_value(&json!(5), Some(&json!(6)), &ctx()));
-    assert!(matches_value(&json!({"gt": 3, "lt": 10}), Some(&json!(5)), &ctx()));
-    assert!(!matches_value(&json!({"gt": 3, "lt": 4}), Some(&json!(5)), &ctx()));
-    assert!(matches_value(&json!({"regex": "^ch_"}), Some(&json!("ch_123")), &ctx()));
-    assert!(matches_value(&json!({"one_of": ["a", "b"]}), Some(&json!("b")), &ctx()));
+    assert!(matches_value(
+        &json!({"gt": 3, "lt": 10}),
+        Some(&json!(5)),
+        &ctx()
+    ));
+    assert!(!matches_value(
+        &json!({"gt": 3, "lt": 4}),
+        Some(&json!(5)),
+        &ctx()
+    ));
+    assert!(matches_value(
+        &json!({"regex": "^ch_"}),
+        Some(&json!("ch_123")),
+        &ctx()
+    ));
+    assert!(matches_value(
+        &json!({"one_of": ["a", "b"]}),
+        Some(&json!("b")),
+        &ctx()
+    ));
     assert!(matches_value(&json!({"absent": true}), None, &ctx()));
-    assert!(!matches_value(&json!({"absent": true}), Some(&json!(1)), &ctx()));
+    assert!(!matches_value(
+        &json!({"absent": true}),
+        Some(&json!(1)),
+        &ctx()
+    ));
 }
 
 #[test]
 fn tag_matching() {
-    assert!(matches_value(&json!({"$tag": "any"}), Some(&json!("x")), &ctx()));
+    assert!(matches_value(
+        &json!({"$tag": "any"}),
+        Some(&json!("x")),
+        &ctx()
+    ));
     assert!(matches_value(
         &json!({"$tag": "uuid"}),
         Some(&json!("6ba7b810-9dad-11d1-80b4-00c04fd430c8")),
         &ctx()
     ));
-    assert!(!matches_value(&json!({"$tag": "uuid"}), Some(&json!("nope")), &ctx()));
-    assert!(matches_value(&json!({"$tag": "not-null"}), Some(&json!(0)), &ctx()));
-    assert!(matches_value(&json!({"$tag": "null"}), Some(&Value::Null), &ctx()));
+    assert!(!matches_value(
+        &json!({"$tag": "uuid"}),
+        Some(&json!("nope")),
+        &ctx()
+    ));
+    assert!(matches_value(
+        &json!({"$tag": "not-null"}),
+        Some(&json!(0)),
+        &ctx()
+    ));
+    assert!(matches_value(
+        &json!({"$tag": "null"}),
+        Some(&Value::Null),
+        &ctx()
+    ));
 }
 
 #[test]
@@ -36,9 +74,17 @@ fn near_now_within_tolerance() {
     let c = ctx();
     let anchor = chrono::DateTime::from_timestamp_millis(c.anchor_unix_ms).unwrap();
     let ts = (anchor + chrono::Duration::seconds(2)).to_rfc3339();
-    assert!(matches_value(&json!({"$tag": "near-now", "arg": "5s"}), Some(&json!(ts)), &c));
+    assert!(matches_value(
+        &json!({"$tag": "near-now", "arg": "5s"}),
+        Some(&json!(ts)),
+        &c
+    ));
     let far = (anchor + chrono::Duration::seconds(60)).to_rfc3339();
-    assert!(!matches_value(&json!({"$tag": "near-now", "arg": "5s"}), Some(&json!(far)), &c));
+    assert!(!matches_value(
+        &json!({"$tag": "near-now", "arg": "5s"}),
+        Some(&json!(far)),
+        &c
+    ));
 }
 
 #[test]

@@ -32,9 +32,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "postgres://localhost:5432/vault_demo".into());
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/15".into());
-    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8091);
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8091);
 
-    let db = PgPoolOptions::new().max_connections(8).connect(&db_url).await?;
+    let db = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url)
+        .await?;
     migrate(&db).await?;
     let redis_client = redis::Client::open(redis_url)?;
     let redis = redis::aio::ConnectionManager::new(redis_client).await?;
@@ -125,9 +131,17 @@ async fn create_order(
         .ok()
         .flatten();
     match user {
-        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "user_not_found"}))),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "user_not_found"})),
+            )
+        }
         Some(row) if row.get::<String, _>(0) != "active" => {
-            return (StatusCode::FORBIDDEN, Json(json!({"error": "user_inactive"})))
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "user_inactive"})),
+            )
         }
         _ => {}
     }
@@ -141,7 +155,10 @@ async fn create_order(
         .flatten()
         .map(|r| r.get(0));
     if balance.unwrap_or(0) < total {
-        return (StatusCode::PAYMENT_REQUIRED, Json(json!({"error": "insufficient_funds"})));
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({"error": "insufficient_funds"})),
+        );
     }
 
     let order_id: i64 = match sqlx::query(
@@ -153,7 +170,12 @@ async fn create_order(
     .await
     {
         Ok(row) => row.get(0),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        }
     };
 
     let charge = app
@@ -174,7 +196,10 @@ async fn create_order(
                 .execute(&app.db)
                 .await
                 .ok();
-            return (StatusCode::BAD_GATEWAY, Json(json!({"error": "payment_failed", "id": order_id})));
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "payment_failed", "id": order_id})),
+            );
         }
     };
 
@@ -193,7 +218,13 @@ async fn create_order(
 
     let mut r = app.redis.clone();
     let summary = json!({"status": "pending", "total_cents": total, "user_id": req.user_id});
-    let _: Result<(), _> = r.set_ex(format!("order:{order_id}:summary"), summary.to_string(), 3600).await;
+    let _: Result<(), _> = r
+        .set_ex(
+            format!("order:{order_id}:summary"),
+            summary.to_string(),
+            3600,
+        )
+        .await;
 
     let email = app.email_url.clone();
     let http = app.http.clone();
@@ -236,7 +267,10 @@ async fn get_order(State(app): State<Arc<App>>, Path(id): Path<i64>) -> (StatusC
                 "external_charge_id": r.get::<Option<String>, _>(4),
             })),
         ),
-        None => (StatusCode::NOT_FOUND, Json(json!({"error": "order_not_found"}))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "order_not_found"})),
+        ),
     }
 }
 
@@ -258,7 +292,10 @@ async fn update_order(
         .map(|r| r.rows_affected())
         .unwrap_or(0);
     if updated == 0 {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "order_not_found"})));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "order_not_found"})),
+        );
     }
     sqlx::query("INSERT INTO audit_log (entity, entity_id, action) VALUES ('order', $1, $2)")
         .bind(id.to_string())
@@ -268,7 +305,10 @@ async fn update_order(
         .ok();
     let mut r = app.redis.clone();
     let _: Result<(), _> = r.del(format!("order:{id}:summary")).await;
-    (StatusCode::OK, Json(json!({"id": id, "status": req.status})))
+    (
+        StatusCode::OK,
+        Json(json!({"id": id, "status": req.status})),
+    )
 }
 
 async fn delete_order(State(app): State<Arc<App>>, Path(id): Path<i64>) -> StatusCode {
@@ -290,11 +330,13 @@ async fn delete_order(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Statu
     if deleted == 0 {
         return StatusCode::NOT_FOUND;
     }
-    sqlx::query("INSERT INTO audit_log (entity, entity_id, action) VALUES ('order', $1, 'deleted')")
-        .bind(id.to_string())
-        .execute(&app.db)
-        .await
-        .ok();
+    sqlx::query(
+        "INSERT INTO audit_log (entity, entity_id, action) VALUES ('order', $1, 'deleted')",
+    )
+    .bind(id.to_string())
+    .execute(&app.db)
+    .await
+    .ok();
     let mut r = app.redis.clone();
     let _: Result<(), _> = r.del(format!("order:{id}:summary")).await;
     StatusCode::NO_CONTENT

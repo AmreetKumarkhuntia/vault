@@ -5,7 +5,11 @@ mod runcmd;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "vault", version, about = "Black-box HTTP API test harness: YAML-defined tests with seeded Postgres/Redis, a recording dependency mock, and verification that names exactly what is missing.")]
+#[command(
+    name = "vault",
+    version,
+    about = "Black-box HTTP API test harness: YAML-defined tests with seeded Postgres/Redis, a recording dependency mock, and verification that names exactly what is missing."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -72,21 +76,34 @@ fn main() {
 
     let cli = Cli::parse();
     let code = match cli.command {
-        Command::Run { pattern, tag, env, suite_dir, step, shuffle, seed, report, junit, verbose } => {
-            runcmd::run(runcmd::RunArgs {
-                pattern,
-                tags: tag,
-                env,
-                suite_dir,
-                step,
-                shuffle,
-                seed,
-                report,
-                junit,
-                verbose,
-            })
-        }
-        Command::List { pattern, tag, suite_dir } => runcmd::list(pattern, tag, suite_dir),
+        Command::Run {
+            pattern,
+            tag,
+            env,
+            suite_dir,
+            step,
+            shuffle,
+            seed,
+            report,
+            junit,
+            verbose,
+        } => runcmd::run(runcmd::RunArgs {
+            pattern,
+            tags: tag,
+            env,
+            suite_dir,
+            step,
+            shuffle,
+            seed,
+            report,
+            junit,
+            verbose,
+        }),
+        Command::List {
+            pattern,
+            tag,
+            suite_dir,
+        } => runcmd::list(pattern, tag, suite_dir),
         Command::Validate { suite_dir } => runcmd::validate(suite_dir),
         Command::Env { env, suite_dir } => runcmd::print_env(env, suite_dir),
     };
