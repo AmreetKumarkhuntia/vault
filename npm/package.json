@@ -1,0 +1,31 @@
+{
+  "name": "@amreetkumarkhuntia/vault",
+  "version": "0.0.0",
+  "description": "Black-box HTTP API test harness. Wrapper that downloads the prebuilt vault binary from GitHub Releases.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AmreetKumarkhuntia/vault.git"
+  },
+  "homepage": "https://github.com/AmreetKumarkhuntia/vault#readme",
+  "bin": {
+    "vault": "bin/vault.js"
+  },
+  "files": [
+    "bin/vault.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "testing",
+    "http",
+    "api",
+    "test-harness",
+    "black-box",
+    "cli"
+  ]
+}

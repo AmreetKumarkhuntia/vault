@@ -36,6 +36,19 @@ The target runs untouched. Its only coupling to vault is configuration: its data
 
 Per-test lifecycle: `RESET → SEED → ARM MOCKS → RUN STEPS → VERIFY END-STATE → REPORT`. Isolation is reset-*before* (TRUNCATE / FLUSHDB), so a crashed run never poisons the next one and failed-test state stays in place for post-mortem.
 
+## Install
+
+```sh
+# npx (Linux x64/arm64 — static binaries, Alpine-friendly):
+npx @amreetkumarkhuntia/vault --help
+
+# prebuilt binary: grab the tar.gz for your arch from the Releases page
+#   https://github.com/AmreetKumarkhuntia/vault/releases  (verify with SHA256SUMS)
+
+# from source (any platform, incl. macOS):
+cargo install --git https://github.com/AmreetKumarkhuntia/vault vault
+```
+
 ## Quick start
 
 ```sh

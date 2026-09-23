@@ -10,7 +10,8 @@ PID  := target/demo-target.pid
 BIN  := ./target/debug
 
 .PHONY: help build test validate list env suite negative test-all demo \
-        target-start target-stop db-setup stores-up stores-down clean
+        target-start target-stop db-setup stores-up stores-down clean \
+        npm-pack release-dry-run
 
 help:
 	@echo "make build         build the whole workspace"
@@ -76,6 +77,12 @@ test-all: test suite negative
 
 demo:
 	./scripts/demo.sh
+
+npm-pack:
+	cd npm && npm pack
+
+release-dry-run:
+	gh workflow run release.yaml
 
 stores-up:
 	docker compose up -d
