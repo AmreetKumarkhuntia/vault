@@ -28,7 +28,7 @@ jobs:
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
-      prs_created: ${{ steps.rp.outputs.prs_created }}
+      pr: ${{ steps.rp.outputs.pr }}
     steps:
       - id: rp
         uses: googleapis/release-please-action@v4
@@ -39,15 +39,19 @@ jobs:
 
   # release-please bumps Cargo.toml via the version annotation but cannot
   # write Cargo.lock; cargo itself syncs it inside the release PR so the
-  # `--locked` release build stays honest.
+  # `--locked` release build stays honest. The PR branch name comes from the
+  # action's `pr` output — it varies with the component config, so never
+  # hardcode it.
   sync-lockfile:
     needs: release-please
-    if: needs.release-please.outputs.prs_created == 'true'
+    if: needs.release-please.outputs.pr
     runs-on: ubuntu-latest
+    env:
+      PR_BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: release-please--branches--main
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
       - uses: dtolnay/rust-toolchain@stable
       - name: sync workspace member versions into Cargo.lock
         run: cargo update --workspace
@@ -58,7 +62,7 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add Cargo.lock
             git commit -m "chore: sync Cargo.lock with release version"
-            git push origin HEAD:release-please--branches--main
+            git push origin "HEAD:${PR_BRANCH}"
           fi
 
   build:
