@@ -26,7 +26,11 @@ pub async fn execute_request(
         (Some(u), _) => engine.render_str(u)?,
         (None, Some(p)) => {
             let p = engine.render_str(p)?;
-            format!("{}/{}", base_url.trim_end_matches('/'), p.trim_start_matches('/'))
+            format!(
+                "{}/{}",
+                base_url.trim_end_matches('/'),
+                p.trim_start_matches('/')
+            )
         }
         (None, None) => return Err(CoreError::Http("request has no path/url".into())),
     };
@@ -46,7 +50,10 @@ pub async fn execute_request(
     }
     for (k, v) in &spec.headers {
         let rendered = engine.render_value(v)?;
-        let text = rendered.as_str().map(String::from).unwrap_or_else(|| rendered.to_string());
+        let text = rendered
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| rendered.to_string());
         req = req.header(k, text);
     }
 
@@ -54,7 +61,10 @@ pub async fn execute_request(
         let mut pairs = Vec::new();
         for (k, v) in &spec.query {
             let rendered = engine.render_value(v)?;
-            let text = rendered.as_str().map(String::from).unwrap_or_else(|| rendered.to_string());
+            let text = rendered
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| rendered.to_string());
             pairs.push((k.clone(), text));
         }
         req = req.query(&pairs);
@@ -73,13 +83,22 @@ pub async fn execute_request(
     }
 
     let started = Instant::now();
-    let resp = req.send().await.map_err(|e| CoreError::Http(format!("{url}: {e}")))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| CoreError::Http(format!("{url}: {e}")))?;
     let status = resp.status().as_u16();
     let mut headers = Map::new();
     for (k, v) in resp.headers() {
-        headers.insert(k.to_string(), Value::String(v.to_str().unwrap_or("").to_string()));
+        headers.insert(
+            k.to_string(),
+            Value::String(v.to_str().unwrap_or("").to_string()),
+        );
     }
-    let body = resp.text().await.map_err(|e| CoreError::Http(format!("{url}: {e}")))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| CoreError::Http(format!("{url}: {e}")))?;
     let body_json = serde_json::from_str(&body).unwrap_or(Value::Null);
 
     Ok(StepResponse {

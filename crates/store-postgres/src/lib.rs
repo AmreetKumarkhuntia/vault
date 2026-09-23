@@ -38,8 +38,14 @@ impl StoreDriver for PostgresDriver {
                     if m.contains_key("table") && !m.contains_key("rows") {
                         return Err(ValidationError::new(&path, "`table` needs `rows`"));
                     }
-                    if !m.contains_key("table") && !m.contains_key("sql") && !m.contains_key("sql_file") {
-                        return Err(ValidationError::new(&path, "needs table+rows, sql, or sql_file"));
+                    if !m.contains_key("table")
+                        && !m.contains_key("sql")
+                        && !m.contains_key("sql_file")
+                    {
+                        return Err(ValidationError::new(
+                            &path,
+                            "needs table+rows, sql, or sql_file",
+                        ));
                     }
                 }
                 Ok(())
@@ -57,7 +63,10 @@ impl StoreDriver for PostgresDriver {
                         return Err(ValidationError::new(&path, "needs `table`"));
                     }
                     if !m.contains_key("expect") && !m.contains_key("expect_absent") {
-                        return Err(ValidationError::new(&path, "needs `expect` or `expect_absent`"));
+                        return Err(ValidationError::new(
+                            &path,
+                            "needs `expect` or `expect_absent`",
+                        ));
                     }
                 }
                 Ok(())
@@ -109,22 +118,27 @@ impl StateStore for PostgresStore {
     }
 
     async fn reset(&self, spec: &StoreDoc) -> Result<(), StoreError> {
-        let mode = spec.get("mode").and_then(Value::as_str).unwrap_or("truncate");
+        let mode = spec
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("truncate");
         if mode == "none" {
             return Ok(());
         }
         let exclude: Vec<String> = spec
             .get("exclude")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_else(|| vec!["schema_migrations".into(), "_sqlx_migrations".into()]);
 
-        let rows = sqlx::query(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_err)?;
+        let rows = sqlx::query("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
         let tables: Vec<String> = rows
             .iter()
             .map(|r| r.get::<String, _>(0))
@@ -133,11 +147,17 @@ impl StateStore for PostgresStore {
         if tables.is_empty() {
             return Ok(());
         }
-        let list = tables.iter().map(|t| quote_ident(t)).collect::<Vec<_>>().join(", ");
-        sqlx::query(sqlx::AssertSqlSafe(format!("TRUNCATE {list} RESTART IDENTITY CASCADE")))
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
+        let list = tables
+            .iter()
+            .map(|t| quote_ident(t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "TRUNCATE {list} RESTART IDENTITY CASCADE"
+        )))
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 
@@ -150,25 +170,35 @@ impl StateStore for PostgresStore {
 
         for entry in entries {
             if let Some(sql) = entry.get("sql").and_then(Value::as_str) {
-                sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).execute(&mut *tx).await.map_err(db_err)?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
                 receipt.entries.push("postgres: executed inline sql".into());
             } else if let Some(file) = entry.get("sql_file").and_then(Value::as_str) {
                 let path = std::path::Path::new(&self.suite_root).join(file);
                 let sql = std::fs::read_to_string(&path).map_err(|e| {
                     StoreError::Harness(format!("seed sql_file {}: {e}", path.display()))
                 })?;
-                sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&mut *tx).await.map_err(db_err)?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
                 receipt.entries.push(format!("postgres: executed {file}"));
             } else if let Some(table) = entry.get("table").and_then(Value::as_str) {
-                let rows = entry
-                    .get("rows")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| StoreError::Harness(format!("seed table `{table}`: rows missing")))?;
-                let conflict = entry.get("conflict").and_then(Value::as_str).unwrap_or("error");
+                let rows = entry.get("rows").and_then(Value::as_array).ok_or_else(|| {
+                    StoreError::Harness(format!("seed table `{table}`: rows missing"))
+                })?;
+                let conflict = entry
+                    .get("conflict")
+                    .and_then(Value::as_str)
+                    .unwrap_or("error");
                 for row in rows {
                     insert_row(&mut tx, table, row, conflict).await?;
                 }
-                receipt.entries.push(format!("postgres: {table} +{} rows", rows.len()));
+                receipt
+                    .entries
+                    .push(format!("postgres: {table} +{} rows", rows.len()));
             }
         }
         tx.commit().await.map_err(db_err)?;
@@ -214,7 +244,10 @@ impl StateStore for PostgresStore {
                         format!("watch: table `{table}` gained a row"),
                         format!("watch.{table}"),
                         Value::Null,
-                        FailureKind::UnexpectedChange { before: Value::Null, after: row.clone() },
+                        FailureKind::UnexpectedChange {
+                            before: Value::Null,
+                            after: row.clone(),
+                        },
                     )));
                 }
             }
@@ -224,7 +257,10 @@ impl StateStore for PostgresStore {
                         format!("watch: table `{table}` lost a row"),
                         format!("watch.{table}"),
                         Value::Null,
-                        FailureKind::UnexpectedChange { before: row.clone(), after: Value::Null },
+                        FailureKind::UnexpectedChange {
+                            before: row.clone(),
+                            after: Value::Null,
+                        },
                     )));
                 }
             }
@@ -236,7 +272,9 @@ impl StateStore for PostgresStore {
     }
 
     async fn verify(&self, doc: &StoreDoc, opts: &VerifyOpts) -> Result<VerifyOutcome, StoreError> {
-        let ctx = MatchCtx { anchor_unix_ms: opts.anchor_unix_ms };
+        let ctx = MatchCtx {
+            anchor_unix_ms: opts.anchor_unix_ms,
+        };
         let entries = doc
             .as_array()
             .ok_or_else(|| StoreError::Harness("verify.postgres must be a list".into()))?;
@@ -259,7 +297,9 @@ impl StateStore for PostgresStore {
                             format!("table `{table}`: row expected absent is present"),
                             format!("{yaml_path}.expect_absent[{ai}]"),
                             exp.clone(),
-                            FailureKind::UnexpectedRow { actual: found.clone() },
+                            FailureKind::UnexpectedRow {
+                                actual: found.clone(),
+                            },
                         ))),
                         None => out.push_pass(format!("{table}: absent row confirmed")),
                     }
@@ -271,9 +311,15 @@ impl StateStore for PostgresStore {
 
     async fn inspect(&self, query: &str) -> Result<Table, StoreError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *tx).await.map_err(db_err)?;
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         let wrapped = format!("SELECT to_jsonb(q) AS r FROM ({query}) q");
-        let rows = sqlx::query(sqlx::AssertSqlSafe(wrapped)).fetch_all(&mut *tx).await.map_err(db_err)?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(wrapped))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_err)?;
         tx.rollback().await.ok();
 
         let mut table = Table::default();
@@ -283,7 +329,9 @@ impl StateStore for PostgresStore {
                 if table.columns.is_empty() {
                     table.columns = obj.keys().cloned().collect();
                 }
-                table.rows.push(table.columns.iter().map(|c| obj[c].clone()).collect());
+                table
+                    .rows
+                    .push(table.columns.iter().map(|c| obj[c].clone()).collect());
             }
         }
         Ok(table)
@@ -292,8 +340,14 @@ impl StateStore for PostgresStore {
 
 impl PostgresStore {
     async fn fetch_rows(&self, table: &str) -> Result<Vec<Value>, StoreError> {
-        let sql = format!("SELECT to_jsonb(t) AS r FROM {} t LIMIT 1000", quote_ident(table));
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(&self.pool).await.map_err(db_err)?;
+        let sql = format!(
+            "SELECT to_jsonb(t) AS r FROM {} t LIMIT 1000",
+            quote_ident(table)
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
         Ok(rows.iter().map(|r| r.get::<Value, _>("r")).collect())
     }
 }
@@ -331,7 +385,10 @@ fn verify_expected_rows(
             }
             None => {
                 let mut failure = CheckFailure::new(
-                    format!("table `{table}`: expected row MISSING — {}", identity_summary(exp)),
+                    format!(
+                        "table `{table}`: expected row MISSING — {}",
+                        identity_summary(exp)
+                    ),
                     format!("{yaml_path}.expect[{i}]"),
                     exp.clone(),
                     FailureKind::MissingRow,
@@ -342,7 +399,10 @@ fn verify_expected_rows(
         }
     }
 
-    let count_mode = entry.get("count").and_then(Value::as_str).unwrap_or("at_least");
+    let count_mode = entry
+        .get("count")
+        .and_then(Value::as_str)
+        .unwrap_or("at_least");
     if count_mode == "exact" {
         for (j, row) in rows.iter().enumerate() {
             if claimed[j] {
@@ -354,7 +414,9 @@ fn verify_expected_rows(
                     format!("table `{table}`: unexpected extra row in expected key-space"),
                     format!("{yaml_path}.count"),
                     json!("count: exact"),
-                    FailureKind::UnexpectedRow { actual: row.clone() },
+                    FailureKind::UnexpectedRow {
+                        actual: row.clone(),
+                    },
                 )));
             }
         }
@@ -362,10 +424,11 @@ fn verify_expected_rows(
 }
 
 fn row_matches(expected: &Value, actual: &Value, ctx: &MatchCtx) -> bool {
-    let Some(exp) = expected.as_object() else { return false };
-    exp.iter().all(|(col, matcher)| {
-        matchers::matches_value(matcher, actual.get(col), ctx)
-    })
+    let Some(exp) = expected.as_object() else {
+        return false;
+    };
+    exp.iter()
+        .all(|(col, matcher)| matchers::matches_value(matcher, actual.get(col), ctx))
 }
 
 /// Identity columns are the literal (non-matcher) values — the part that says
@@ -412,11 +475,19 @@ fn rank_near_misses(
         .filter(|(j, _)| !claimed[*j])
         .map(|(_, row)| {
             let (score, diffs) = matchers::score_object(expected, row, ctx);
-            NearMiss { actual: row.clone(), diffs, score }
+            NearMiss {
+                actual: row.clone(),
+                diffs,
+                score,
+            }
         })
         .filter(|nm| nm.score >= 0.5)
         .collect();
-    misses.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    misses.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     misses.truncate(3);
     misses
 }
@@ -433,7 +504,11 @@ async fn insert_row(
         .keys()
         .cloned()
         .collect();
-    let col_list = cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let col_list = cols
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
     // jsonb_populate_record derives column types server-side, so YAML values
     // land in timestamptz/uuid/numeric/jsonb columns without client-side casts.
     let mut sql = format!(

@@ -3,9 +3,9 @@ use vault_dsl::{CallExpect, UnmatchedPolicy};
 use vault_store::matchers::{self, MatchCtx};
 use vault_store::{CheckFailure, CheckResult, FailureKind, NearMiss, VerifyOutcome};
 
-use crate::matcher::{component_score, full_score, request_matches, body_matches};
-use crate::session::SessionReport;
+use crate::matcher::{body_matches, component_score, full_score, request_matches};
 use crate::record::RecordedExchange;
+use crate::session::SessionReport;
 
 pub fn verify_calls(
     report: &SessionReport,
@@ -22,11 +22,16 @@ pub fn verify_calls(
         out.checks.push(CheckResult::Fail(CheckFailure::new(
             format!(
                 "mock `{}` received a request no stub matched (served {}): {} {}",
-                hit.dependency, crate::UNMATCHED_STATUS, hit.request.method, hit.request.path
+                hit.dependency,
+                crate::UNMATCHED_STATUS,
+                hit.request.method,
+                hit.request.path
             ),
             format!("mocks.{}", hit.dependency),
             json!("every request to a mocked dependency must match a stub"),
-            FailureKind::UnexpectedCall { exchange: hit.to_report_value() },
+            FailureKind::UnexpectedCall {
+                exchange: hit.to_report_value(),
+            },
         )));
     }
 
@@ -132,7 +137,9 @@ pub fn verify_calls(
                     ),
                     "verify.unexpected",
                     json!("no calls: expectation claims this recording"),
-                    FailureKind::UnexpectedCall { exchange: rec.to_report_value() },
+                    FailureKind::UnexpectedCall {
+                        exchange: rec.to_report_value(),
+                    },
                 )));
             }
         }
@@ -219,11 +226,19 @@ fn near_misses(call: &CallExpect, recs: &[RecordedExchange], ctx: &MatchCtx) -> 
                 .and_then(|b| b.get("json_partial"))
                 .map(|partial| matchers::json_contains(partial, &r.request.body_json, ctx))
                 .unwrap_or_default();
-            NearMiss { actual: r.to_report_value(), diffs, score }
+            NearMiss {
+                actual: r.to_report_value(),
+                diffs,
+                score,
+            }
         })
         .filter(|nm| nm.score >= 0.3)
         .collect();
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(3);
     scored
 }
@@ -240,7 +255,11 @@ fn check_order(
 ) {
     let mut prev: i64 = -1;
     for name in group {
-        let Some(idx) = calls.iter().enumerate().position(|(i, c)| &c.label(i) == name) else {
+        let Some(idx) = calls
+            .iter()
+            .enumerate()
+            .position(|(i, c)| &c.label(i) == name)
+        else {
             continue;
         };
         let mut seqs: Vec<u64> = claimed
@@ -257,9 +276,7 @@ fn check_order(
                 let interleaving: Vec<(String, u64)> = claimed
                     .iter()
                     .enumerate()
-                    .filter_map(|(j, c)| {
-                        c.map(|i| (calls[i].label(i), recs[j].seq))
-                    })
+                    .filter_map(|(j, c)| c.map(|i| (calls[i].label(i), recs[j].seq)))
                     .collect();
                 out.checks.push(CheckResult::Fail(CheckFailure::new(
                     format!("order violated in group {gi}: `{name}` did not occur after its predecessor"),

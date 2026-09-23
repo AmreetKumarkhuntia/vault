@@ -22,17 +22,22 @@ fn single_expression_keeps_native_type() {
     let e = engine();
     assert_eq!(e.render_value(&json!("{{ order_id }}")).unwrap(), json!(42));
     assert_eq!(
-        e.render_value(&json!("{{ steps.create.captures.order_id }}")).unwrap(),
+        e.render_value(&json!("{{ steps.create.captures.order_id }}"))
+            .unwrap(),
         json!(42)
     );
-    assert_eq!(e.render_value(&json!("{{ vars.user_id }}")).unwrap(), json!(7));
+    assert_eq!(
+        e.render_value(&json!("{{ vars.user_id }}")).unwrap(),
+        json!(7)
+    );
 }
 
 #[test]
 fn mixed_strings_render_to_text() {
     let e = engine();
     assert_eq!(
-        e.render_value(&json!("/api/orders/{{ order_id }}")).unwrap(),
+        e.render_value(&json!("/api/orders/{{ order_id }}"))
+            .unwrap(),
         json!("/api/orders/42")
     );
 }
@@ -58,7 +63,9 @@ fn now_is_frozen() {
 #[test]
 fn unknown_reference_errors() {
     let e = engine();
-    assert!(e.render_value(&json!("{{ steps.nope.captures.x }}")).is_err());
+    assert!(e
+        .render_value(&json!("{{ steps.nope.captures.x }}"))
+        .is_err());
 }
 
 fn resp(status: u16, body: Value) -> StepResponse {
@@ -78,8 +85,13 @@ fn spec(v: Value) -> ExpectSpec {
 #[test]
 fn status_classes_and_lists() {
     let ctx = MatchCtx::default();
-    assert!(assert_response("s", &spec(json!({"status": "2xx"})), &resp(204, json!(null)), &ctx)
-        .passed());
+    assert!(assert_response(
+        "s",
+        &spec(json!({"status": "2xx"})),
+        &resp(204, json!(null)),
+        &ctx
+    )
+    .passed());
     assert!(assert_response(
         "s",
         &spec(json!({"status": [200, 201]})),
@@ -87,8 +99,13 @@ fn status_classes_and_lists() {
         &ctx
     )
     .passed());
-    assert!(!assert_response("s", &spec(json!({"status": 200})), &resp(404, json!(null)), &ctx)
-        .passed());
+    assert!(!assert_response(
+        "s",
+        &spec(json!({"status": 200})),
+        &resp(404, json!(null)),
+        &ctx
+    )
+    .passed());
 }
 
 #[test]
@@ -108,7 +125,12 @@ fn jsonpath_ops() {
 fn json_partial_failure_carries_diffs() {
     let ctx = MatchCtx::default();
     let r = resp(200, json!({"status": "confirmed"}));
-    let out = assert_response("s", &spec(json!({"json_partial": {"status": "pending"}})), &r, &ctx);
+    let out = assert_response(
+        "s",
+        &spec(json!({"json_partial": {"status": "pending"}})),
+        &r,
+        &ctx,
+    );
     let fails: Vec<_> = out.failures().collect();
     assert_eq!(fails.len(), 1);
     match &fails[0].kind {

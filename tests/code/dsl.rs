@@ -108,15 +108,24 @@ fn unknown_fields_are_rejected() {
 fn suite_with(tests: Vec<TestDef>, flows: Vec<FlowDef>) -> Suite {
     Suite {
         root: "tests".into(),
-        config: parse_str("environments: { local: { target: { base_url: http://x } } }", "cfg")
-            .unwrap(),
+        config: parse_str(
+            "environments: { local: { target: { base_url: http://x } } }",
+            "cfg",
+        )
+        .unwrap(),
         tests: tests
             .into_iter()
-            .map(|def| LoadedTest { path: "t.test.yaml".into(), def })
+            .map(|def| LoadedTest {
+                path: "t.test.yaml".into(),
+                def,
+            })
             .collect(),
         flows: flows
             .into_iter()
-            .map(|def| LoadedFlow { path: "f.flow.yaml".into(), def })
+            .map(|def| LoadedFlow {
+                path: "f.flow.yaml".into(),
+                def,
+            })
             .collect(),
     }
 }
@@ -140,7 +149,11 @@ verify:
     )
     .unwrap();
     let issues = validate_suite(&suite_with(vec![t], vec![]));
-    let text = issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+    let text = issues
+        .iter()
+        .map(|i| i.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("duplicate step name"), "{text}");
     assert!(text.contains("needs `path` or `url`"), "{text}");
     assert!(text.contains("not declared under mocks"), "{text}");
@@ -153,9 +166,11 @@ fn catches_unexported_flow_reference() {
         "inline",
     )
     .unwrap();
-    let t2: TestDef =
-        parse_str("test: b\nsteps: [{name: s, request: {method: GET, path: /y}}]", "inline")
-            .unwrap();
+    let t2: TestDef = parse_str(
+        "test: b\nsteps: [{name: s, request: {method: GET, path: /y}}]",
+        "inline",
+    )
+    .unwrap();
     let flow: FlowDef = parse_str(
         r#"
 flow: f
@@ -169,7 +184,9 @@ stages:
     .unwrap();
     let issues = validate_suite(&suite_with(vec![t1, t2], vec![flow]));
     assert!(
-        issues.iter().any(|i| i.message.contains("not exported by any earlier stage")),
+        issues
+            .iter()
+            .any(|i| i.message.contains("not exported by any earlier stage")),
         "{issues:?}"
     );
 }

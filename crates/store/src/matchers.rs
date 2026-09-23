@@ -13,8 +13,24 @@ use serde_json::Value;
 use crate::FieldDiff;
 
 const OPERATOR_KEYS: &[&str] = &[
-    "regex", "eq", "ne", "gt", "gte", "lt", "lte", "one_of", "len", "contains", "exists",
-    "absent", "type", "json_partial", "starts_with", "ends_with", "under", "over",
+    "regex",
+    "eq",
+    "ne",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "one_of",
+    "len",
+    "contains",
+    "exists",
+    "absent",
+    "type",
+    "json_partial",
+    "starts_with",
+    "ends_with",
+    "under",
+    "over",
 ];
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -26,9 +42,7 @@ pub struct MatchCtx {
 /// True when the value is an operator map (all keys are known operators).
 pub fn is_matcher_map(v: &Value) -> bool {
     match v {
-        Value::Object(m) if !m.is_empty() => {
-            m.keys().all(|k| OPERATOR_KEYS.contains(&k.as_str()))
-        }
+        Value::Object(m) if !m.is_empty() => m.keys().all(|k| OPERATOR_KEYS.contains(&k.as_str())),
         _ => false,
     }
 }
@@ -58,15 +72,23 @@ pub fn matches_value(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -
 pub fn describe(expected: &Value) -> String {
     if let Some(m) = expected.as_object() {
         if let Some(tag) = m.get("$tag").and_then(|t| t.as_str()) {
-            let arg = m.get("arg").map(|a| format!(" {}", compact(a))).unwrap_or_default();
+            let arg = m
+                .get("arg")
+                .map(|a| format!(" {}", compact(a)))
+                .unwrap_or_default();
             return match tag {
-                "near-now" => format!("<within{} of test start>", if arg.is_empty() { " 5s".into() } else { arg }),
+                "near-now" => format!(
+                    "<within{} of test start>",
+                    if arg.is_empty() { " 5s".into() } else { arg }
+                ),
                 other => format!("<{other}{arg}>"),
             };
         }
         if is_matcher_map(expected) {
-            let parts: Vec<String> =
-                m.iter().map(|(k, v)| format!("{k} {}", compact(v))).collect();
+            let parts: Vec<String> = m
+                .iter()
+                .map(|(k, v)| format!("{k} {}", compact(v)))
+                .collect();
             return format!("<{}>", parts.join(", "));
         }
     }
@@ -92,13 +114,17 @@ fn match_tag(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -> bool {
             match tag {
                 "null" => actual.is_null(),
                 "not-null" => !actual.is_null(),
-                "number" => actual.is_number() || actual.as_str().is_some_and(|s| s.parse::<f64>().is_ok()),
+                "number" => {
+                    actual.is_number() || actual.as_str().is_some_and(|s| s.parse::<f64>().is_ok())
+                }
                 "uuid" => actual.as_str().is_some_and(is_uuid),
-                "iso8601" => actual.as_str().is_some_and(|s| parse_timestamp(s).is_some()),
+                "iso8601" => actual
+                    .as_str()
+                    .is_some_and(|s| parse_timestamp(s).is_some()),
                 "near-now" => {
                     let tol_ms = arg
                         .and_then(|a| a.as_str())
-                        .and_then(|s| humantime_ms(s))
+                        .and_then(humantime_ms)
                         .unwrap_or(5_000);
                     near_now(actual, ctx.anchor_unix_ms, tol_ms)
                 }
@@ -161,7 +187,9 @@ fn match_operators(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -> 
                     }
                     "contains" => match actual {
                         Value::String(s) => arg.as_str().is_some_and(|a| s.contains(a)),
-                        Value::Array(items) => items.iter().any(|i| matches_value(arg, Some(i), ctx)),
+                        Value::Array(items) => {
+                            items.iter().any(|i| matches_value(arg, Some(i), ctx))
+                        }
                         _ => false,
                     },
                     "type" => arg.as_str().is_some_and(|t| type_name(actual) == t),
@@ -189,12 +217,16 @@ fn str_pair(a: &Value, b: &Value) -> Option<(String, String)> {
 }
 
 fn regex_match(pattern: &Value, actual: &Value) -> bool {
-    let Some(p) = pattern.as_str() else { return false };
+    let Some(p) = pattern.as_str() else {
+        return false;
+    };
     let hay = match actual {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    regex::Regex::new(p).map(|re| re.is_match(&hay)).unwrap_or(false)
+    regex::Regex::new(p)
+        .map(|re| re.is_match(&hay))
+        .unwrap_or(false)
 }
 
 pub fn type_name(v: &Value) -> &'static str {
@@ -219,7 +251,9 @@ pub fn deep_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Object(ma), Value::Object(mb)) => {
             ma.len() == mb.len()
-                && ma.iter().all(|(k, v)| mb.get(k).is_some_and(|w| deep_eq(v, w)))
+                && ma
+                    .iter()
+                    .all(|(k, v)| mb.get(k).is_some_and(|w| deep_eq(v, w)))
         }
         (Value::Array(xa), Value::Array(xb)) => {
             xa.len() == xb.len() && xa.iter().zip(xb).all(|(x, y)| deep_eq(x, y))
@@ -290,11 +324,19 @@ fn near_now(actual: &Value, anchor_ms: i64, tol_ms: i64) -> bool {
         Value::String(s) => parse_timestamp(s),
         Value::Number(n) => n.as_i64().map(|secs_or_ms| {
             // Heuristic: values below 10^12 are seconds.
-            if secs_or_ms < 1_000_000_000_000 { secs_or_ms * 1000 } else { secs_or_ms }
+            if secs_or_ms < 1_000_000_000_000 {
+                secs_or_ms * 1000
+            } else {
+                secs_or_ms
+            }
         }),
         _ => None,
     };
-    let anchor = if anchor_ms == 0 { Utc::now().timestamp_millis() } else { anchor_ms };
+    let anchor = if anchor_ms == 0 {
+        Utc::now().timestamp_millis()
+    } else {
+        anchor_ms
+    };
     actual_ms.is_some_and(|a| (a - anchor).abs() <= tol_ms)
 }
 

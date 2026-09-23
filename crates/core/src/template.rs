@@ -62,7 +62,10 @@ impl TemplateEngine {
         match v {
             Value::String(s) => self.render_string_value(s),
             Value::Array(items) => Ok(Value::Array(
-                items.iter().map(|i| self.render_value(i)).collect::<Result<_, _>>()?,
+                items
+                    .iter()
+                    .map(|i| self.render_value(i))
+                    .collect::<Result<_, _>>()?,
             )),
             Value::Object(m) => {
                 let mut out = Map::with_capacity(m.len());

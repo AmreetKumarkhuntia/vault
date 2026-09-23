@@ -112,11 +112,18 @@ impl TestRunner {
         result: &mut TestResult,
     ) -> Result<(), CoreError> {
         let anchor_ms = now_ms();
-        let match_ctx = MatchCtx { anchor_unix_ms: anchor_ms };
+        let match_ctx = MatchCtx {
+            anchor_unix_ms: anchor_ms,
+        };
 
         if do_reset {
             for (kind, store) in &self.stores {
-                let spec = self.defaults.reset.get(kind).cloned().unwrap_or(Value::Null);
+                let spec = self
+                    .defaults
+                    .reset
+                    .get(kind)
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 store.reset(&spec).await?;
             }
         }
@@ -126,7 +133,10 @@ impl TestRunner {
             .iter()
             .map(|(name, dep)| {
                 let prefix = dep.prefix.clone().unwrap_or_else(|| format!("/{name}"));
-                (name.clone(), json!({"base_url": format!("{}{}", self.mock.base_url(), prefix)}))
+                (
+                    name.clone(),
+                    json!({"base_url": format!("{}{}", self.mock.base_url(), prefix)}),
+                )
             })
             .collect();
 
@@ -162,14 +172,18 @@ impl TestRunner {
             Some((store.clone(), doc.clone(), store.snapshot(&doc).await?))
         };
 
-        if self.gate_pause(&PausePoint::AfterSeed, def, None, &engine, None) == GateDecision::AbortTest {
+        if self.gate_pause(&PausePoint::AfterSeed, def, None, &engine, None)
+            == GateDecision::AbortTest
+        {
             return Err(CoreError::Harness("aborted at seed".into()));
         }
 
         let rendered_mocks = render_mocks(&engine, def)?;
-        let guard = self
-            .mock
-            .arm(Session::new(&def.test, &rendered_mocks, self.defaults.mock.unmatched.clone()));
+        let guard = self.mock.arm(Session::new(
+            &def.test,
+            &rendered_mocks,
+            self.defaults.mock.unmatched.clone(),
+        ));
 
         if self.gate_pause(&PausePoint::MocksArmed, def, None, &engine, Some(&guard))
             == GateDecision::AbortTest
@@ -192,7 +206,10 @@ impl TestRunner {
                 Some(&guard),
             );
             if decision == GateDecision::AbortTest {
-                return Err(CoreError::Harness(format!("aborted at step `{}`", step.name)));
+                return Err(CoreError::Harness(format!(
+                    "aborted at step `{}`",
+                    step.name
+                )));
             }
             if failed {
                 result.status = TestStatus::Failed;
@@ -207,8 +224,13 @@ impl TestRunner {
             }
         }
 
-        if self.gate_pause(&PausePoint::BeforeVerify, def, last_response.as_ref(), &engine, Some(&guard))
-            == GateDecision::AbortTest
+        if self.gate_pause(
+            &PausePoint::BeforeVerify,
+            def,
+            last_response.as_ref(),
+            &engine,
+            Some(&guard),
+        ) == GateDecision::AbortTest
         {
             return Err(CoreError::Harness("aborted before verify".into()));
         }
@@ -229,9 +251,7 @@ impl TestRunner {
             verify.merge(store.diff_snapshot(&doc, &before).await?);
         }
 
-        if !def.verify.calls.is_empty()
-            || !def.mocks.is_empty()
-        {
+        if !def.verify.calls.is_empty() || !def.mocks.is_empty() {
             self.wait_for_mock_quiet(&guard).await;
             let report = guard.drain();
             let unexpected = def
@@ -257,8 +277,11 @@ impl TestRunner {
                 &match_ctx,
             ));
             if result.status != TestStatus::Passed || !verify.passed() {
-                result.recorded_calls =
-                    report.recordings.iter().map(|r| r.to_report_value()).collect();
+                result.recorded_calls = report
+                    .recordings
+                    .iter()
+                    .map(|r| r.to_report_value())
+                    .collect();
             }
         }
 
@@ -338,7 +361,11 @@ impl TestRunner {
 
             let step_result = StepResult {
                 name: step.name.clone(),
-                status: if passed { TestStatus::Passed } else { TestStatus::Failed },
+                status: if passed {
+                    TestStatus::Passed
+                } else {
+                    TestStatus::Failed
+                },
                 response: Some(ResponseSummary {
                     status: resp.status,
                     elapsed_ms: resp.elapsed.as_millis() as u64,
@@ -367,7 +394,10 @@ impl TestRunner {
         let settle = self.defaults.verify.settle;
         let interval = self.defaults.verify.poll_interval;
         let deadline_ms = max_eventually_ms(doc);
-        let opts = VerifyOpts { anchor_unix_ms: anchor_ms, settle };
+        let opts = VerifyOpts {
+            anchor_unix_ms: anchor_ms,
+            settle,
+        };
         let started = Instant::now();
         let deadline = started + Duration::from_millis(deadline_ms);
         let mut attempts = 0u32;
@@ -422,7 +452,8 @@ impl TestRunner {
         };
         let decision = self.gate.pause(point, &snap);
         if decision == GateDecision::AbortRun {
-            self.abort_run.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.abort_run
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             return GateDecision::AbortTest;
         }
         decision
@@ -436,11 +467,7 @@ impl TestRunner {
         })
     }
 
-    pub async fn run_flow(
-        &self,
-        flow: &FlowDef,
-        tests: &HashMap<String, &TestDef>,
-    ) -> FlowOutcome {
+    pub async fn run_flow(&self, flow: &FlowDef, tests: &HashMap<String, &TestDef>) -> FlowOutcome {
         let mut results = Vec::new();
         let mut flow_scope = Map::new();
         let mut chain_broken = false;
@@ -499,7 +526,10 @@ impl TestRunner {
             results.push(result);
         }
 
-        FlowOutcome { name: flow.flow.clone(), results }
+        FlowOutcome {
+            name: flow.flow.clone(),
+            results,
+        }
     }
 }
 
@@ -588,5 +618,8 @@ fn truncate(s: &str, n: usize) -> String {
 
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }

@@ -20,7 +20,11 @@ pub fn assert_response(
             out.push_pass(format!("{step}: status {}", resp.status));
         } else {
             out.checks.push(fail(
-                format!("{step}: status is {} — expected {}", resp.status, compact(status_spec)),
+                format!(
+                    "{step}: status is {} — expected {}",
+                    resp.status,
+                    compact(status_spec)
+                ),
                 at("status"),
                 status_spec.clone(),
                 vec![diff("status", status_spec.clone(), json!(resp.status))],
@@ -45,7 +49,11 @@ pub fn assert_response(
                 format!("{step}: header `{name}` mismatch"),
                 at(&format!("headers.{name}")),
                 matcher.clone(),
-                vec![diff(name, matcher.clone(), actual.cloned().unwrap_or(Value::Null))],
+                vec![diff(
+                    name,
+                    matcher.clone(),
+                    actual.cloned().unwrap_or(Value::Null),
+                )],
             ));
         }
     }
@@ -99,7 +107,11 @@ pub fn assert_response(
                 format!("{step}: jsonpath `{}` mismatch", assert.path),
                 at(&format!("jsonpath[{i}]")),
                 json!({"path": assert.path, "ops": ops}),
-                vec![diff(&assert.path, ops, actual.cloned().unwrap_or(Value::Null))],
+                vec![diff(
+                    &assert.path,
+                    ops,
+                    actual.cloned().unwrap_or(Value::Null),
+                )],
             ));
         }
     }
@@ -122,7 +134,11 @@ pub fn assert_response(
                 format!("{step}: raw body mismatch"),
                 at("body"),
                 body_spec.clone(),
-                vec![diff("body", body_spec.clone(), json!(truncate(&resp.body, 500)))],
+                vec![diff(
+                    "body",
+                    body_spec.clone(),
+                    json!(truncate(&resp.body, 500)),
+                )],
             ));
         }
     }
@@ -153,7 +169,10 @@ fn status_ok(spec: &Value, actual: u16) -> bool {
         Value::String(s) => {
             let s = s.trim();
             if let Some(class) = s.strip_suffix("xx") {
-                class.parse::<u16>().map(|c| actual / 100 == c).unwrap_or(false)
+                class
+                    .parse::<u16>()
+                    .map(|c| actual / 100 == c)
+                    .unwrap_or(false)
             } else {
                 s.parse::<u16>().map(|v| v == actual).unwrap_or(false)
             }
@@ -203,7 +222,11 @@ fn with_diffs(
 }
 
 fn diff(path: &str, expected: Value, actual: Value) -> vault_store::FieldDiff {
-    vault_store::FieldDiff { path: path.to_string(), expected, actual }
+    vault_store::FieldDiff {
+        path: path.to_string(),
+        expected,
+        actual,
+    }
 }
 
 fn compact(v: &Value) -> String {

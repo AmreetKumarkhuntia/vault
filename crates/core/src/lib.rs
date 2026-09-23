@@ -9,7 +9,9 @@ mod template;
 
 pub use assert_http::assert_response;
 pub use capture::capture_value;
-pub use engine::{FlowOutcome, Gate, GateDecision, NoopGate, PausePoint, PauseSnapshot, TestRunner};
+pub use engine::{
+    FlowOutcome, Gate, GateDecision, NoopGate, PausePoint, PauseSnapshot, TestRunner,
+};
 pub use http::{execute_request, StepResponse};
 pub use result::*;
 pub use template::TemplateEngine;

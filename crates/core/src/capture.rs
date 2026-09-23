@@ -57,9 +57,9 @@ pub fn capture_value(
             .captures(&hay)
             .and_then(|c| c.get(rx.group))
             .map(|m| Value::String(m.as_str().to_string()))
-            .ok_or_else(|| {
-                CoreError::Harness(format!("capture `{name}`: regex matched nothing"))
-            });
+            .ok_or_else(|| CoreError::Harness(format!("capture `{name}`: regex matched nothing")));
     }
-    Err(CoreError::Harness(format!("capture `{name}`: no source configured")))
+    Err(CoreError::Harness(format!(
+        "capture `{name}`: no source configured"
+    )))
 }

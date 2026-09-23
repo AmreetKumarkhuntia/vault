@@ -34,16 +34,17 @@ pub struct ArmedStub {
 }
 
 impl Session {
-    pub fn new(key: &str, mocks: &IndexMap<String, MockDep>, default_unmatched: UnmatchedPolicy) -> Self {
+    pub fn new(
+        key: &str,
+        mocks: &IndexMap<String, MockDep>,
+        default_unmatched: UnmatchedPolicy,
+    ) -> Self {
         let deps = mocks
             .iter()
             .map(|(name, dep)| {
                 let armed = ArmedDep {
                     name: name.clone(),
-                    prefix: dep
-                        .prefix
-                        .clone()
-                        .unwrap_or_else(|| format!("/{name}")),
+                    prefix: dep.prefix.clone().unwrap_or_else(|| format!("/{name}")),
                     unmatched: dep.unmatched.clone(),
                     stubs: dep
                         .stubs

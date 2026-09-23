@@ -29,7 +29,10 @@ pub struct VerifyOpts {
 
 impl Default for VerifyOpts {
     fn default() -> Self {
-        Self { anchor_unix_ms: 0, settle: Duration::from_millis(500) }
+        Self {
+            anchor_unix_ms: 0,
+            settle: Duration::from_millis(500),
+        }
     }
 }
 

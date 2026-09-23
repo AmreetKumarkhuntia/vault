@@ -29,7 +29,8 @@ impl Gate for InteractiveGate {
             "⏸".cyan().bold(),
             snap.test.bold(),
             label,
-            "(c=continue, resp, vars, calls, db <sql>, redis <cmd>, q=abort test, Q=abort run)".dimmed()
+            "(c=continue, resp, vars, calls, db <sql>, redis <cmd>, q=abort test, Q=abort run)"
+                .dimmed()
         );
         loop {
             print!("{} ", "step>".cyan());
@@ -46,8 +47,18 @@ impl Gate for InteractiveGate {
                 "resp" => match snap.last_response {
                     Some(r) => {
                         println!("status: {} ({}ms)", r.status, r.elapsed.as_millis());
-                        println!("headers: {}", serde_json::to_string_pretty(&r.headers).unwrap_or_default());
-                        println!("body: {}", if r.body_json.is_null() { r.body.clone() } else { serde_json::to_string_pretty(&r.body_json).unwrap_or_default() });
+                        println!(
+                            "headers: {}",
+                            serde_json::to_string_pretty(&r.headers).unwrap_or_default()
+                        );
+                        println!(
+                            "body: {}",
+                            if r.body_json.is_null() {
+                                r.body.clone()
+                            } else {
+                                serde_json::to_string_pretty(&r.body_json).unwrap_or_default()
+                            }
+                        );
                     }
                     None => println!("no response yet"),
                 },
@@ -58,7 +69,10 @@ impl Gate for InteractiveGate {
                         "flow": snap.ctx.get("flow"),
                         "mock": snap.ctx.get("mock"),
                     });
-                    println!("{}", serde_json::to_string_pretty(&pruned).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&pruned).unwrap_or_default()
+                    );
                 }
                 "calls" => {
                     if snap.recordings.is_empty() {

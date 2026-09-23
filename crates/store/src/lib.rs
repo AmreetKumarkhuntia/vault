@@ -47,6 +47,9 @@ pub struct ValidationError {
 
 impl ValidationError {
     pub fn new(yaml_path: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { yaml_path: yaml_path.into(), message: message.into() }
+        Self {
+            yaml_path: yaml_path.into(),
+            message: message.into(),
+        }
     }
 }

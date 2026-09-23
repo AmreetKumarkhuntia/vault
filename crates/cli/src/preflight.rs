@@ -27,7 +27,12 @@ pub async fn check(
             let client = reqwest::Client::new();
             let deadline = Instant::now() + h.timeout;
             loop {
-                match client.get(&url).timeout(Duration::from_secs(2)).send().await {
+                match client
+                    .get(&url)
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await
+                {
                     Ok(r) if r.status().is_success() => break Ok(format!("{} OK", r.status())),
                     Ok(r) => {
                         if Instant::now() >= deadline {
@@ -48,10 +53,17 @@ pub async fn check(
     rows.push((format!("target {}", env.target.base_url), target_result));
 
     for (kind, store) in stores {
-        let r = store.ping().await.map(|_| "OK".to_string()).map_err(|e| e.to_string());
-        rows.push((format!("{kind}"), r));
+        let r = store
+            .ping()
+            .await
+            .map(|_| "OK".to_string())
+            .map_err(|e| e.to_string());
+        rows.push((kind.to_string(), r));
     }
-    rows.push((format!("mock listener {}", mock.base_url()), Ok("bound".into())));
+    rows.push((
+        format!("mock listener {}", mock.base_url()),
+        Ok("bound".into()),
+    ));
 
     let failed = rows.iter().any(|(_, r)| r.is_err());
     if failed {
