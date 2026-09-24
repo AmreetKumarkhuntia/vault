@@ -222,11 +222,11 @@ jobs:
       - name: publish npm wrapper
         working-directory: npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "NPM_TOKEN secret not set; skipping npm publish."
-            exit 0
+            echo "::error::NODE_AUTH_TOKEN repository secret is not set."
+            exit 1
           fi
           npm version "${TAG#v}" --no-git-tag-version
           npm publish --access public --provenance
