@@ -12,6 +12,8 @@ const REPO = "AmreetKumarkhuntia/vault";
 const TARGETS = {
   "linux-x64": "x86_64-unknown-linux-musl",
   "linux-arm64": "aarch64-unknown-linux-musl",
+  "darwin-x64": "x86_64-apple-darwin",
+  "darwin-arm64": "aarch64-apple-darwin",
 };
 
 function fail(msg) {
@@ -19,18 +21,31 @@ function fail(msg) {
   process.exit(1);
 }
 
-function targetTriple() {
-  const key = `${process.platform}-${process.arch}`;
+function targetTriple(platform = process.platform, arch = process.arch) {
+  const key = `${platform}-${arch}`;
   const triple = TARGETS[key];
   if (!triple) {
-    fail(
-      `no prebuilt binary for ${key}. Prebuilt binaries cover Linux x64/arm64 only.\n` +
-        `On macOS/Windows, build from source instead:\n` +
+    throw new Error(
+      `no prebuilt binary for ${key}. Prebuilt binaries cover Linux and macOS x64/arm64.\n` +
+        `Build from source instead:\n` +
         `  cargo install --git https://github.com/${REPO} vault\n` +
         `or: git clone https://github.com/${REPO} && cd vault && make build`
     );
   }
   return triple;
+}
+
+function localBinary(configured = process.env.VAULT_BINARY) {
+  if (!configured) return null;
+  const bin = path.resolve(configured);
+  try {
+    const stat = fs.statSync(bin);
+    if (!stat.isFile()) throw new Error("not a regular file");
+    fs.accessSync(bin, fs.constants.X_OK);
+  } catch (e) {
+    throw new Error(`VAULT_BINARY is not executable (${bin}): ${e.message}`);
+  }
+  return bin;
 }
 
 // Package dir first; falls back to ~/.cache when the package dir is
@@ -88,17 +103,7 @@ async function download(triple, dir) {
   fs.chmodSync(path.join(dir, "vault"), 0o755);
 }
 
-async function main() {
-  if (pkg.version === "0.0.0") {
-    fail("this is an unpublished placeholder build; the version is stamped at publish time");
-  }
-  const triple = targetTriple();
-  const dir = cacheDir(triple);
-  const bin = path.join(dir, "vault");
-  if (!fs.existsSync(bin)) {
-    console.error(`vault: downloading v${pkg.version} (${triple})...`);
-    await download(triple, dir);
-  }
+function launch(bin) {
   const child = spawn(bin, process.argv.slice(2), { stdio: "inherit" });
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
     process.on(sig, () => child.kill(sig));
@@ -111,4 +116,27 @@ async function main() {
   child.on("error", (e) => fail(`failed to exec downloaded binary: ${e.message}`));
 }
 
-main().catch((e) => fail(e.message));
+async function main() {
+  const override = localBinary();
+  if (override) {
+    launch(override);
+    return;
+  }
+  if (pkg.version === "0.0.0") {
+    throw new Error("this is an unpublished placeholder build; the version is stamped at publish time");
+  }
+  const triple = targetTriple();
+  const dir = cacheDir(triple);
+  const bin = path.join(dir, "vault");
+  if (!fs.existsSync(bin)) {
+    console.error(`vault: downloading v${pkg.version} (${triple})...`);
+    await download(triple, dir);
+  }
+  launch(bin);
+}
+
+if (require.main === module) {
+  main().catch((e) => fail(e.message));
+}
+
+module.exports = { localBinary, targetTriple };

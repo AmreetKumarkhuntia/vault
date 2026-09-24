@@ -141,6 +141,10 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     env:
       TAG: ${{ inputs.tag || needs.version.outputs.tag_name || 'v0.0.0-dev' }}
@@ -155,18 +159,14 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: install musl toolchain
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: build
         run: cargo build --release --locked -p vault --target ${{ matrix.target }}
       - name: smoke test
         run: ./target/${{ matrix.target }}/release/vault --version
       - name: package
-        run: |
-          NAME="vault-${TAG}-${{ matrix.target }}"
-          mkdir -p "dist/${NAME}"
-          cp "target/${{ matrix.target }}/release/vault" README.md LICENSE "dist/${NAME}/"
-          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
-          (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+        run: bash scripts/package-release.sh "${{ matrix.target }}" "$TAG" dist
       - uses: actions/upload-artifact@v4
         with:
           name: tarball-${{ matrix.target }}

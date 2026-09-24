@@ -74,3 +74,49 @@ jobs:
           set -e
           echo "exit code: $code"
           test "$code" -eq 1
+
+  distribution:
+    name: distribution (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: distribution-${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: install musl toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: npm launcher unit tests
+        working-directory: npm
+        run: npm test
+
+      - name: build release binary
+        run: cargo build --release --locked -p vault --target ${{ matrix.target }}
+
+      - name: package release archive
+        run: bash scripts/package-release.sh "${{ matrix.target }}" v0.0.0-dev dist
+
+      - name: packed npm CLI and HTTP-only suite
+        env:
+          VAULT_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/vault
+        run: bash scripts/npm-smoke.sh

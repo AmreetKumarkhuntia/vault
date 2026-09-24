@@ -1,6 +1,6 @@
 # vault
 
-Black-box HTTP API test harness. Point it at a running server and it controls everything around it: seeds Postgres and Redis before each test, impersonates the server's external dependencies with a recording mock, fires HTTP steps, and verifies responses, database end-state, cache end-state, and every outbound call the server made — all from declarative YAML, no code.
+Black-box HTTP API test harness. Point it at a running server and it fires HTTP steps, verifies responses, and can optionally seed and verify Postgres/Redis or impersonate external dependencies with a recording mock — all from declarative YAML, no test code.
 
 Its signature feature is diagnosability: when an expected insertion is missing, the report names exactly which row, and shows a per-column diff against the closest actual row:
 
@@ -39,7 +39,11 @@ Per-test lifecycle: `RESET → SEED → ARM MOCKS → RUN STEPS → VERIFY END-S
 ## Install
 
 ```sh
-# npx (Linux x64/arm64 — static binaries, Alpine-friendly):
+# Install in a project, then use the short executable name:
+npm install --save-dev @amreetkumarkhuntia/vault
+npx vault --run ./tests/flows
+
+# Or run the scoped package without installing it first:
 npx @amreetkumarkhuntia/vault --help
 
 # prebuilt binary: grab the tar.gz for your arch from the Releases page
@@ -85,7 +89,38 @@ vault run --step           # pause at each lifecycle boundary: resp / vars / cal
 vault run --shuffle        # order-independence audit
 ```
 
+The npm-friendly shorthand accepts either the suite directory or its root config file, and forwards additional run options:
+
+```sh
+npx vault --run ./tests/flows
+npx vault --run ./tests/flows/vault.yaml -t smoke
+```
+
+To exercise the packed npm CLI from this checkout before a release exists:
+
+```sh
+make npm-smoke
+```
+
 Exit codes: `0` pass · `1` a test failed · `2` config/usage error · `3` environment/preflight error.
+
+## HTTP-only suites (no Postgres or Redis)
+
+State stores are optional. Leave `postgres` and `redis` out of `vault.yaml`, and omit their `seed` / `verify` blocks from tests. Vault will not connect to, reset, or verify either service:
+
+```yaml
+# vault.yaml
+version: 1
+environments:
+  local:
+    target:
+      base_url: http://127.0.0.1:8080
+      health_check: { path: /healthz, timeout: 5s }
+    mock_server:
+      bind: 127.0.0.1:0
+```
+
+Place HTTP tests in nested `*.test.yaml` files as usual. See `tests/http-only` for a runnable example.
 
 ## Anatomy of a test
 
@@ -173,12 +208,12 @@ tests/
 docs/DESIGN.md     full design document
 ```
 
-`vault run` reads `tests/flows` by default (`--suite-dir` overrides). The store layer is a trait boundary: adding MySQL or Mongo later is a new driver crate plus one registration line in the CLI — the engine never learns store specifics, because seed/verify blocks are driver-owned documents.
+`vault run` reads `tests/flows` by default (`--suite-dir` overrides). `vault --run <path>` is a shorthand for the same command and also accepts the path to `vault.yaml`. The store layer is a trait boundary: adding MySQL or Mongo later is a new driver crate plus one registration line in the CLI — the engine never learns store specifics, because seed/verify blocks are driver-owned documents.
 
 ## Notes & limitations (v1)
 
 - Execution is serial by design: one target, one database. The session abstractions reserve hooks for parallel lanes.
 - Transaction-rollback isolation is impossible for a black-box target (it owns its own connections) — that's why isolation is TRUNCATE-based and documented as such.
-- Redis verification requires a dedicated logical DB (e.g. `/15`); the driver refuses db 0 without `allow_db0: true`.
+- When enabled, Redis verification requires a dedicated logical DB (e.g. `/15`); the driver refuses db 0 without `allow_db0: true`.
 - The target's in-process caches don't reset with the DB; if your server has a reset endpoint, call it via a seed `sql:`-style hook or an extra step.
 - `skip: "${env.FLAG:-reason}"` gates a test on an environment variable — an empty value means "run it" (see `tests/negative/`).

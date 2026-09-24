@@ -2,13 +2,16 @@ mod gate;
 mod preflight;
 mod runcmd;
 
+use std::ffi::OsString;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
     name = "vault",
     version,
-    about = "Black-box HTTP API test harness: YAML-defined tests with seeded Postgres/Redis, a recording dependency mock, and verification that names exactly what is missing."
+    about = "Black-box HTTP API test harness: YAML-defined tests with optional state stores, a recording dependency mock, and verification that names exactly what is missing.",
+    after_help = "Quick run: vault --run <SUITE_DIR|vault.yaml> [RUN_OPTIONS]"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -74,7 +77,7 @@ fn main() {
         )
         .init();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_quick_run(std::env::args_os()));
     let code = match cli.command {
         Command::Run {
             pattern,
@@ -108,4 +111,52 @@ fn main() {
         Command::Env { env, suite_dir } => runcmd::print_env(env, suite_dir),
     };
     std::process::exit(code);
+}
+
+/// Keep the regular clap subcommand as the single source of truth while
+/// supporting the npm-friendly `vault --run <suite>` shorthand.
+fn normalize_quick_run(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = args.into_iter().collect();
+    if args.get(1).is_some_and(|arg| arg == "--run") {
+        args[1] = OsString::from("run");
+        args.insert(2, OsString::from("--suite-dir"));
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_quick_run;
+    use std::ffi::OsString;
+
+    fn strings(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn expands_quick_run_and_preserves_following_options() {
+        assert_eq!(
+            normalize_quick_run(strings(&[
+                "vault",
+                "--run",
+                "tests/http-only",
+                "--tag",
+                "smoke",
+            ])),
+            strings(&[
+                "vault",
+                "run",
+                "--suite-dir",
+                "tests/http-only",
+                "--tag",
+                "smoke",
+            ])
+        );
+    }
+
+    #[test]
+    fn leaves_existing_subcommands_unchanged() {
+        let args = strings(&["vault", "run", "--suite-dir", "tests/flows"]);
+        assert_eq!(normalize_quick_run(args.clone()), args);
+    }
 }

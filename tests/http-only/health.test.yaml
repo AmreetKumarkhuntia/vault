@@ -1,0 +1,10 @@
+test: HTTP-only health check
+description: Exercises request and response assertions without configuring a state store
+tags: [http-only, smoke]
+
+steps:
+  - name: health
+    request: { method: GET, path: /healthz }
+    expect:
+      status: 200
+      json_partial: { status: ok }

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -33,14 +33,65 @@ pub fn registry() -> StoreRegistry {
     reg
 }
 
-fn load_suite(suite_dir: &str) -> Result<Suite, i32> {
-    match vault_dsl::discover(Path::new(suite_dir)) {
+fn resolve_suite_root(suite_path: &str) -> Result<PathBuf, i32> {
+    let path = Path::new(suite_path);
+    if path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    if path.is_file() && path.file_name().is_some_and(|name| name == "vault.yaml") {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        return Ok(if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        });
+    }
+
+    let detail = if path.exists() {
+        "expected a suite directory or its vault.yaml file"
+    } else {
+        "path does not exist"
+    };
+    eprintln!(
+        "{} `{}`: {detail}",
+        "config error:".red().bold(),
+        path.display()
+    );
+    Err(2)
+}
+
+fn load_suite(suite_path: &str) -> Result<Suite, i32> {
+    let root = resolve_suite_root(suite_path)?;
+    match vault_dsl::discover(&root) {
         Ok(s) => Ok(s),
         Err(e) => {
             eprintln!("{} {e}", "config error:".red().bold());
             Err(2)
         }
     }
+}
+
+fn validate_environment_stores(suite: &Suite, environment: &vault_dsl::Environment) -> Vec<String> {
+    let configured: HashSet<&str> = environment.stores.keys().map(String::as_str).collect();
+    let mut issues = Vec::new();
+
+    for test in &suite.tests {
+        let origin = test.path.display();
+        for kind in test.def.seed.keys().chain(test.def.verify.stores.keys()) {
+            if !configured.contains(kind.as_str()) {
+                issues.push(format!(
+                    "{origin}: store `{kind}` is used but not configured in the selected environment"
+                ));
+            }
+        }
+        if !test.def.watch.is_empty() && !configured.contains("postgres") {
+            issues.push(format!(
+                "{origin}: `watch` requires a configured `postgres` store"
+            ));
+        }
+    }
+
+    issues
 }
 
 fn validate_all(suite: &Suite, reg: &StoreRegistry) -> Vec<String> {
@@ -247,6 +298,17 @@ pub fn run(args: RunArgs) -> i32 {
         );
         return 2;
     };
+    let store_issues = validate_environment_stores(&suite, &environment);
+    if !store_issues.is_empty() {
+        for issue in &store_issues {
+            eprintln!("{} {issue}", "✗".red());
+        }
+        eprintln!(
+            "\n{} selected environment is missing required stores",
+            "config error:".red().bold()
+        );
+        return 2;
+    }
     if args.step && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!(
             "{} --step needs an interactive terminal",
@@ -398,4 +460,49 @@ async fn run_async(
     }
 
     run.exit_code()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_suite_root, validate_environment_stores};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn http_only_suite() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/http-only")
+    }
+
+    #[test]
+    fn resolves_a_suite_directory_or_its_config_file() {
+        let directory = http_only_suite();
+        let config = directory.join("vault.yaml");
+        assert_eq!(
+            resolve_suite_root(directory.to_str().unwrap()).unwrap(),
+            directory
+        );
+        assert_eq!(
+            resolve_suite_root(config.to_str().unwrap()).unwrap(),
+            directory
+        );
+    }
+
+    #[test]
+    fn rejects_a_missing_suite_path() {
+        assert_eq!(
+            resolve_suite_root("definitely-not-a-vault-suite").unwrap_err(),
+            2
+        );
+    }
+
+    #[test]
+    fn allows_no_store_suite_and_rejects_an_unconfigured_reference() {
+        let mut suite = vault_dsl::discover(&http_only_suite()).unwrap();
+        let environment = suite.config.environments["local"].clone();
+        assert!(validate_environment_stores(&suite, &environment).is_empty());
+
+        suite.tests[0].def.seed.insert("postgres".into(), json!([]));
+        let issues = validate_environment_stores(&suite, &environment);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("store `postgres` is used but not configured"));
+    }
 }
