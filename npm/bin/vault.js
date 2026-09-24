@@ -59,7 +59,7 @@ function cacheDir(triple) {
   } catch {
     const fallback = path.join(
       process.env.VAULT_DOWNLOAD_DIR ||
-        path.join(os.homedir(), ".cache", "amreetkumarkhuntia-vault"),
+        path.join(os.homedir(), ".cache", "thunderkiller-vault"),
       pkg.version,
       triple
     );

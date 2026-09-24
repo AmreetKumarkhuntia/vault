@@ -1,5 +1,5 @@
 {
-  "name": "@amreetkumarkhuntia/vault",
+  "name": "@thunderkiller/vault",
   "version": "0.0.0",
   "description": "Black-box HTTP API test harness. Wrapper that downloads the prebuilt vault binary from GitHub Releases.",
   "license": "MIT",
