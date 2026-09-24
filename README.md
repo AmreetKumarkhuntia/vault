@@ -212,6 +212,10 @@ docs/DESIGN.md     full design document
 
 ## Notes & limitations (v1)
 
+The prioritized, evidence-backed backlog is tracked in
+[`docs/SHORTCOMINGS.md`](docs/SHORTCOMINGS.md). It separates Vault limitations from adopter-specific
+CI, coverage, and application behavior.
+
 - Execution is serial by design: one target, one database. The session abstractions reserve hooks for parallel lanes.
 - Transaction-rollback isolation is impossible for a black-box target (it owns its own connections) — that's why isolation is TRUNCATE-based and documented as such.
 - When enabled, Redis verification requires a dedicated logical DB (e.g. `/15`); the driver refuses db 0 without `allow_db0: true`.
