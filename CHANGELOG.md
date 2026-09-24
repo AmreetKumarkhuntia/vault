@@ -1,3 +1,8 @@
+## v0.3.2 (2026-09-24)
+
+### Fixes
+- publish npm wrapper under thunderkiller scope (9874bb9)
+
 ## v0.3.1 (2026-09-24)
 
 ### Fixes
