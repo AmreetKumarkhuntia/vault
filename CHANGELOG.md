@@ -1,3 +1,8 @@
+## v0.3.0 (2026-09-24)
+
+### Features
+- add testable npx suite runner (9078a6c)
+
 ## v0.2.0 (2026-09-23)
 
 ### Features

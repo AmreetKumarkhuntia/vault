@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "demo-target"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2722,7 +2722,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vault"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "humantime",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "vault-dsl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "humantime",
  "humantime-serde",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "vault-mock"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "indexmap",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "vault-report"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "comfy-table",
  "owo-colors",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "vault-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "vault-store-postgres"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "vault-store-redis"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "redis",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "vault-tests"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "indexmap",
