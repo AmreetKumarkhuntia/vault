@@ -11,7 +11,7 @@ BIN  := ./target/debug
 
 .PHONY: help build test validate list env suite negative test-all demo \
         target-start target-stop db-setup stores-up stores-down clean \
-        npm-pack release-dry-run
+        npm-pack npm-smoke release-dry-run
 
 help:
 	@echo "make build         build the whole workspace"
@@ -25,6 +25,7 @@ help:
 	@echo "make demo          full guided demo (scripts/demo.sh)"
 	@echo "make target-start  start demo-target in the background (logs: demo-target.log)"
 	@echo "make target-stop   stop it"
+	@echo "make npm-smoke     pack/install npm CLI and run the HTTP-only suite"
 	@echo "make db-setup      create the vault_demo database"
 	@echo "make stores-up     docker compose Postgres+Redis (ports 5433/6380)"
 	@echo "make clean         cargo clean + logs"
@@ -80,6 +81,9 @@ demo:
 
 npm-pack:
 	cd npm && npm pack
+
+npm-smoke:
+	bash scripts/npm-smoke.sh
 
 release-dry-run:
 	gh workflow run release.yaml

@@ -1,0 +1,14 @@
+version: 1
+
+environments:
+  local:
+    target:
+      base_url: "${env.VAULT_HTTP_URL:-http://127.0.0.1:18092}"
+      health_check: { path: /healthz, timeout: 5s }
+    mock_server:
+      bind: 127.0.0.1:0
+
+defaults:
+  request:
+    timeout: 5s
+    headers: { Accept: application/json }
