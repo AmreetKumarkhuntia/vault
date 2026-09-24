@@ -1,4 +1,4 @@
-# @amreetkumarkhuntia/vault
+# @thunderkiller/vault
 
 npx wrapper for [vault](https://github.com/AmreetKumarkhuntia/vault) — a black-box HTTP API test harness with YAML-defined HTTP checks, optional Postgres/Redis verification, and a recording dependency mock.
 
@@ -6,13 +6,13 @@ On first run it downloads the matching prebuilt binary from GitHub Releases (sha
 
 ```sh
 # Installed shorthand:
-npm install --save-dev @amreetkumarkhuntia/vault
+npm install --save-dev @thunderkiller/vault
 npx vault --run ./tests/flows
 
 # One-off usage:
-npx @amreetkumarkhuntia/vault --help
-npx @amreetkumarkhuntia/vault validate --suite-dir tests/flows
-npx @amreetkumarkhuntia/vault --run tests/flows/vault.yaml -t smoke
+npx @thunderkiller/vault --help
+npx @thunderkiller/vault validate --suite-dir tests/flows
+npx @thunderkiller/vault --run tests/flows/vault.yaml -t smoke
 ```
 
 `--run` accepts either a suite directory or its `vault.yaml` file. Tests and flows are discovered recursively below that directory.

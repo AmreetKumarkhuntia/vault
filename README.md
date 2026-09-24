@@ -40,11 +40,11 @@ Per-test lifecycle: `RESET → SEED → ARM MOCKS → RUN STEPS → VERIFY END-S
 
 ```sh
 # Install in a project, then use the short executable name:
-npm install --save-dev @amreetkumarkhuntia/vault
+npm install --save-dev @thunderkiller/vault
 npx vault --run ./tests/flows
 
 # Or run the scoped package without installing it first:
-npx @amreetkumarkhuntia/vault --help
+npx @thunderkiller/vault --help
 
 # prebuilt binary: grab the tar.gz for your arch from the Releases page
 #   https://github.com/AmreetKumarkhuntia/vault/releases  (verify with SHA256SUMS)
