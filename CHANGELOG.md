@@ -1,3 +1,8 @@
+## v0.3.1 (2026-09-24)
+
+### Fixes
+- use configured npm auth token (1dee771)
+
 ## v0.3.0 (2026-09-24)
 
 ### Features
