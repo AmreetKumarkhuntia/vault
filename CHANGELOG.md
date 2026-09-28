@@ -1,3 +1,11 @@
+## v0.3.3 (2026-09-28)
+
+### Fixes
+- reject empty runs and report write errors (29fdffe)
+
+### Other
+- track Vault shortcomings (be10a77)
+
 ## v0.3.2 (2026-09-24)
 
 ### Fixes
