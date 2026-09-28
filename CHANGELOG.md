@@ -1,3 +1,12 @@
+## v0.4.0 (2026-09-28)
+
+### Features
+- add color-free output mode (ee47eac)
+- support validated SQL file fixtures (5960075)
+
+### Other
+- plan SQL fixture validation (afb0927)
+
 ## v0.3.3 (2026-09-28)
 
 ### Fixes
