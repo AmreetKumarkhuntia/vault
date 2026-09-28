@@ -651,9 +651,11 @@ testkit env [--env name]           # print MOCK_*/dependency URLs to export befo
 | `verify` | run the `verify:` block now, non-destructively, single-shot (no `eventually` wait) |
 | `q` / `Q` | abort test (ERRORED, cleanup, next test) / abort run |
 
-**Exit codes:** `0` all passed · `1` ≥1 test FAILED · `2` config/usage error (bad YAML, bad flags, `--step` without TTY) · `3` environment error (preflight failed, store unreachable mid-run) · `130` interrupted (after CLEANUP ran).
+**Exit codes:** `0` all passed · `1` ≥1 test FAILED · `2` config/usage error (bad YAML, bad flags, `--step` without TTY, or an empty `run` selection) · `3` environment/report/harness error (preflight failed, store unreachable mid-run, or a requested report could not be written) · `130` interrupted (after CLEANUP ran).
 
-**Reports:** pretty terminal tree per test (steps ✓/✗, then verify groups, near-miss tables, one line per passing test); JSON report with `schema_version`, per-test stages/timings, every finding as structured data (kind, yaml_path, expected, near_miss diffs, attempts/elapsed) plus the full `recorded_calls` log for failed tests; optional JUnit XML. A JSON Schema of the DSL is published for editor validation.
+`run` resolves its filtered plan after static validation but before creating the async runtime or touching stores, mocks, and the target. If no test or flow matches, it names the requested pattern and tags, writes no reports, and exits `2`. `list` deliberately keeps inspection semantics for the same filter: it prints `0 flows, 0 standalone tests` and exits `0`.
+
+**Reports:** pretty terminal tree per test (steps ✓/✗, then verify groups, near-miss tables, one line per passing test); JSON report with `schema_version`, per-test stages/timings, every finding as structured data (kind, yaml_path, expected, near_miss diffs, attempts/elapsed) plus the full `recorded_calls` log for failed tests; optional JUnit XML. All requested JSON/JUnit writes are attempted independently. Any write failure makes the command exit `3`, while successfully written sibling reports remain available. A JSON Schema of the DSL is published for editor validation.
 
 ---
 

@@ -1,0 +1,17 @@
+version: 1
+
+environments:
+  local:
+    target:
+      base_url: "${env.VAULT_CLI_TEST_URL}"
+      health_check: { path: /healthz, timeout: 2s }
+    mock_server:
+      bind: 127.0.0.1:0
+
+defaults:
+  request:
+    timeout: 2s
+
+report:
+  json: config-report.json
+  junit: config-junit.xml

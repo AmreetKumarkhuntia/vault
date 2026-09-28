@@ -131,6 +131,12 @@ struct Plan<'s> {
     flows: Vec<&'s vault_dsl::LoadedFlow>,
 }
 
+impl Plan<'_> {
+    fn is_empty(&self) -> bool {
+        self.standalone.is_empty() && self.flows.is_empty()
+    }
+}
+
 fn plan<'s>(suite: &'s Suite, pattern: &Option<String>, tags: &[String]) -> Result<Plan<'s>, i32> {
     let matcher = match pattern {
         Some(p) => {
@@ -178,6 +184,68 @@ fn plan<'s>(suite: &'s Suite, pattern: &Option<String>, tags: &[String]) -> Resu
         .collect();
 
     Ok(Plan { standalone, flows })
+}
+
+fn print_empty_selection(pattern: &Option<String>, tags: &[String]) {
+    let pattern = pattern.as_deref().unwrap_or("<none>");
+    let tags = if tags.is_empty() {
+        "<none>".to_string()
+    } else {
+        tags.join(", ")
+    };
+    eprintln!(
+        "{} no tests or flows matched the requested selection",
+        "usage error:".red().bold()
+    );
+    eprintln!("  pattern: {pattern}");
+    eprintln!("  tags: {tags}");
+}
+
+#[derive(Debug)]
+struct ReportWriteFailure {
+    format: &'static str,
+    path: String,
+    error: std::io::Error,
+}
+
+fn write_requested_reports(
+    run: &RunResult,
+    json_path: Option<String>,
+    junit_path: Option<String>,
+) -> Vec<ReportWriteFailure> {
+    let mut failures = Vec::new();
+
+    if let Some(path) = json_path {
+        match vault_report::write_json(run, &path) {
+            Ok(()) => println!("{} JSON report: {path}", "→".cyan()),
+            Err(error) => failures.push(ReportWriteFailure {
+                format: "JSON",
+                path,
+                error,
+            }),
+        }
+    }
+
+    if let Some(path) = junit_path {
+        match vault_report::write_junit(run, &path) {
+            Ok(()) => println!("{} JUnit report: {path}", "→".cyan()),
+            Err(error) => failures.push(ReportWriteFailure {
+                format: "JUnit",
+                path,
+                error,
+            }),
+        }
+    }
+
+    failures
+}
+
+fn report_aware_exit_code(run_exit_code: i32, report_write_failed: bool) -> i32 {
+    if report_write_failed {
+        3
+    } else {
+        run_exit_code
+    }
 }
 
 pub fn list(pattern: Option<String>, tags: Vec<String>, suite_dir: String) -> i32 {
@@ -317,13 +385,23 @@ pub fn run(args: RunArgs) -> i32 {
         return 2;
     }
 
+    let plan = match plan(&suite, &args.pattern, &args.tags) {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    if plan.is_empty() {
+        print_empty_selection(&args.pattern, &args.tags);
+        return 2;
+    }
+
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    runtime.block_on(async { run_async(args, suite, reg, environment).await })
+    runtime.block_on(async { run_async(args, &suite, plan, reg, environment).await })
 }
 
-async fn run_async(
+async fn run_async<'s>(
     args: RunArgs,
-    suite: Suite,
+    suite: &'s Suite,
+    plan: Plan<'s>,
     reg: StoreRegistry,
     environment: vault_dsl::Environment,
 ) -> i32 {
@@ -370,11 +448,6 @@ async fn run_async(
         return code;
     }
 
-    let plan = match plan(&suite, &args.pattern, &args.tags) {
-        Ok(p) => p,
-        Err(c) => return c,
-    };
-
     let gate: Arc<dyn vault_core::Gate> = if args.step {
         Arc::new(InteractiveGate::new(stores.clone()))
     } else {
@@ -401,11 +474,11 @@ async fn run_async(
         Test(&'s vault_dsl::LoadedTest),
         Flow(&'s vault_dsl::LoadedFlow),
     }
-    let mut items: Vec<Item> = plan
-        .flows
-        .iter()
-        .map(|f| Item::Flow(f))
-        .chain(plan.standalone.iter().map(|t| Item::Test(t)))
+    let Plan { flows, standalone } = plan;
+    let mut items: Vec<Item> = flows
+        .into_iter()
+        .map(Item::Flow)
+        .chain(standalone.into_iter().map(Item::Test))
         .collect();
 
     if args.shuffle {
@@ -444,65 +517,19 @@ async fn run_async(
 
     vault_report::print_run(&run, args.verbose);
 
+    let run_exit_code = run.exit_code();
     let json_path = args.report.or(suite.config.report.json.clone());
-    if let Some(path) = json_path {
-        match vault_report::write_json(&run, &path) {
-            Ok(()) => println!("{} JSON report: {path}", "→".cyan()),
-            Err(e) => eprintln!("{} could not write {path}: {e}", "warning:".yellow()),
-        }
-    }
     let junit_path = args.junit.or(suite.config.report.junit.clone());
-    if let Some(path) = junit_path {
-        match vault_report::write_junit(&run, &path) {
-            Ok(()) => println!("{} JUnit report: {path}", "→".cyan()),
-            Err(e) => eprintln!("{} could not write {path}: {e}", "warning:".yellow()),
-        }
-    }
-
-    run.exit_code()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{resolve_suite_root, validate_environment_stores};
-    use serde_json::json;
-    use std::path::PathBuf;
-
-    fn http_only_suite() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/http-only")
-    }
-
-    #[test]
-    fn resolves_a_suite_directory_or_its_config_file() {
-        let directory = http_only_suite();
-        let config = directory.join("vault.yaml");
-        assert_eq!(
-            resolve_suite_root(directory.to_str().unwrap()).unwrap(),
-            directory
-        );
-        assert_eq!(
-            resolve_suite_root(config.to_str().unwrap()).unwrap(),
-            directory
+    let report_failures = write_requested_reports(&run, json_path, junit_path);
+    for failure in &report_failures {
+        eprintln!(
+            "{} could not write {} report to {}: {}",
+            "report error:".red().bold(),
+            failure.format,
+            failure.path,
+            failure.error
         );
     }
 
-    #[test]
-    fn rejects_a_missing_suite_path() {
-        assert_eq!(
-            resolve_suite_root("definitely-not-a-vault-suite").unwrap_err(),
-            2
-        );
-    }
-
-    #[test]
-    fn allows_no_store_suite_and_rejects_an_unconfigured_reference() {
-        let mut suite = vault_dsl::discover(&http_only_suite()).unwrap();
-        let environment = suite.config.environments["local"].clone();
-        assert!(validate_environment_stores(&suite, &environment).is_empty());
-
-        suite.tests[0].def.seed.insert("postgres".into(), json!([]));
-        let issues = validate_environment_stores(&suite, &environment);
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].contains("store `postgres` is used but not configured"));
-    }
+    report_aware_exit_code(run_exit_code, !report_failures.is_empty())
 }

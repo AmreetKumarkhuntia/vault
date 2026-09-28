@@ -1,0 +1,8 @@
+test: report fail
+tags: [negative, reports]
+
+steps:
+  - name: failed assertion
+    request: { method: GET, path: /pass }
+    expect:
+      status: 201

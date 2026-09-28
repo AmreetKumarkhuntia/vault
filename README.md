@@ -57,13 +57,13 @@ cargo install --git https://github.com/AmreetKumarkhuntia/vault vault
 
 ```sh
 # backing stores: local Postgres + Redis, or `make stores-up` (docker, ports 5433/6380)
-make demo        # full guided demo: build, start demo-target, suite, failure showcase
+make demo        # guided demo: suite, safety checks, and failure showcase
 ```
 
 Day-to-day commands (`make help` lists all):
 
 ```sh
-make test        # Rust tests for the harness code (tests/code)
+make test        # workspace Rust tests, including black-box CLI subprocess tests
 make suite       # start demo-target, run the YAML flow suite, stop it
 make suite ARGS='-t smoke -v'
 make negative    # the deliberately-failing showcase (exit 1 is the point)
@@ -102,7 +102,21 @@ To exercise the packed npm CLI from this checkout before a release exists:
 make npm-smoke
 ```
 
-Exit codes: `0` pass · `1` a test failed · `2` config/usage error · `3` environment/preflight error.
+Exit codes: `0` pass · `1` a test failed · `2` config/usage error · `3` environment/preflight/report/harness error.
+
+An empty selection is an error for `vault run`, not a vacuous pass. If a pattern
+and/or tags match no tests or flows, Vault prints the requested pattern and tags
+and exits `2` before creating the async runtime, connecting stores, starting the
+mock server, running preflight, or writing reports. The equivalent `vault list`
+query remains an inspection command: it prints `0 flows, 0 standalone tests` and
+exits `0`.
+
+After a non-empty run, Vault attempts every requested report write. In particular,
+a JSON write failure does not prevent a requested JUnit report from being written
+(and vice versa). Any report-write failure is printed with its format and path and
+makes the command exit `3`; successfully written sibling artifacts are retained.
+`make demo` exercises both safeguards, including report writes from an isolated
+temporary working directory.
 
 ## HTTP-only suites (no Postgres or Redis)
 
@@ -198,7 +212,7 @@ crates/
   mock/            recording mock server + outbound-call verification (bipartite matching)
   core/            engine: lifecycle, templating (minijinja), captures, eventually/settle, flows
   report/          pretty terminal / JSON / JUnit renderers (same structs, lossless)
-  cli/             the `vault` binary
+  cli/             the `vault` binary + black-box CLI tests in cli/tests
 examples/
   demo-target/     the order service the e2e suite runs against
 tests/

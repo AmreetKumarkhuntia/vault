@@ -1,0 +1,9 @@
+test: selection sentinel
+description: Proves whether a CLI selection reaches runtime setup
+tags: [smoke, regression]
+
+steps:
+  - name: never reached
+    request: { method: GET, path: /healthz }
+    expect:
+      status: 200

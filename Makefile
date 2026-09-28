@@ -15,14 +15,14 @@ BIN  := ./target/debug
 
 help:
 	@echo "make build         build the whole workspace"
-	@echo "make test          Rust tests for the harness code (tests/code)"
+	@echo "make test          workspace Rust tests, including black-box CLI tests"
 	@echo "make suite         start demo-target, run the YAML flow suite, stop it"
 	@echo "make negative      run the deliberately-failing showcase tests (exit 1 is the point)"
 	@echo "make test-all      test + suite + negative"
 	@echo "make validate      static-check every YAML file, no execution"
 	@echo "make list          resolved run plan"
 	@echo "make env           print the env the target should be started with"
-	@echo "make demo          full guided demo (scripts/demo.sh)"
+	@echo "make demo          guided suite + selection/report safety checks + failure showcase"
 	@echo "make target-start  start demo-target in the background (logs: demo-target.log)"
 	@echo "make target-stop   stop it"
 	@echo "make npm-smoke     pack/install npm CLI and run the HTTP-only suite"
