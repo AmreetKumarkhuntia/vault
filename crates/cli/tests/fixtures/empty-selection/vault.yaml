@@ -1,0 +1,10 @@
+version: 1
+
+environments:
+  local:
+    target:
+      base_url: http://127.0.0.1:9
+    mock_server:
+      # A TCP port cannot exceed 65535. A selected run must reach this bind
+      # and fail immediately, while an empty selection must exit before setup.
+      bind: 127.0.0.1:65536

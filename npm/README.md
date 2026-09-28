@@ -17,6 +17,8 @@ npx @thunderkiller/vault --run tests/flows/vault.yaml -t smoke
 
 `--run` accepts either a suite directory or its `vault.yaml` file. Tests and flows are discovered recursively below that directory.
 
+An empty `run` selection exits `2` before connecting to the target, stores, or mock server; `list` remains a successful zero-result inspection. If a requested JSON or JUnit report cannot be written, Vault still attempts every other requested report and exits `3`.
+
 Postgres and Redis are optional. An HTTP-only suite simply omits those stores from `vault.yaml` and does not use their seed or verify blocks.
 
 **Supported platforms:** Linux x64/arm64 (static musl binaries, including Alpine) and macOS x64/arm64.

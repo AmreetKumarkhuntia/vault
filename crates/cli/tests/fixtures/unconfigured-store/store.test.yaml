@@ -1,0 +1,11 @@
+test: uses missing store
+
+seed:
+  postgres:
+    - table: widgets
+      rows: [{ id: 1 }]
+
+steps:
+  - name: never reached
+    request: { method: GET, path: /pass }
+    expect: { status: 200 }

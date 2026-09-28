@@ -455,7 +455,7 @@ pub trait StateStore: Send + Sync {
 testkit list [PATTERN] [--tag t]     <span class="c"># resolved run plan, no execution</span>
 testkit validate [--live]            <span class="c"># static checks; --live dry-runs seeds, rolled back</span>
 testkit env [--env name]             <span class="c"># print mock/dependency URLs to export before starting target</span></code></pre>
-<p>Exit codes: <code>0</code> pass · <code>1</code> a test failed · <code>2</code> config/usage error · <code>3</code> environment/preflight error · <code>130</code> interrupted. CI dashboards can tell “broken tests” from “broken environment”.</p>
+<p>Exit codes: <code>0</code> pass · <code>1</code> a test failed · <code>2</code> config/usage error (including an empty <code>run</code> selection) · <code>3</code> environment/preflight/report/harness error · <code>130</code> interrupted. An empty run names its pattern and tags before any runtime or preflight work; the same <code>list</code> filter reports zero matches and exits <code>0</code>. All requested JSON and JUnit writes are attempted, and any write failure exits <code>3</code> without removing a successful sibling report.</p>
 <p><code>--step</code> pauses after seeding, after arming mocks, after every step, and before end-state verification:</p>
 <div class="tablewrap"><table>
   <tr><th>Command</th><th>Effect</th></tr>

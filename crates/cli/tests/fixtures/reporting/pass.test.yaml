@@ -1,0 +1,9 @@
+test: report pass
+tags: [smoke, reports]
+
+steps:
+  - name: successful request
+    request: { method: GET, path: /pass }
+    expect:
+      status: 200
+      json_partial: { status: ok }
