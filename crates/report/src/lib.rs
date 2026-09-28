@@ -1,3 +1,5 @@
+#![deny(clippy::print_stderr, clippy::print_stdout)]
+
 //! Renderers for run results: pretty terminal, JSON, JUnit XML.
 //! All three consume the same structs — the JSON report is lossless with
 //! respect to the terminal output, never a re-parse of it.

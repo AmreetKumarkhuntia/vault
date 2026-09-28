@@ -449,12 +449,14 @@ pub trait StateStore: Send + Sync {
 <p><strong>Mock internals:</strong> one axum listener for the whole run (the target reads its config once, so the address must be stable); N dependencies share it via path prefixes. Stubs match in declaration order, first full match wins — predictability over specificity scoring. Unmatched requests answer with status <strong>599</strong>: unmistakable in target logs, impossible to confuse with a real upstream. Serving is deliberately separate from verification (canned-serve now, strict verify later against the recording log) — which is why this is bare axum and not wiremock.</p>
 
 <h2 id="s6"><span class="no">6</span>CLI &amp; step-by-step mode</h2>
-<pre><code>testkit run [PATTERN] [--tag t]… [--env name] [--step] [--break-at test:step]
+<pre><code>testkit [--no-color] &lt;command&gt;     <span class="c"># also honors NO_COLOR and CLICOLOR=0</span>
+testkit run [PATTERN] [--tag t]… [--env name] [--step] [--break-at test:step]
             [--shuffle [--seed N]] [--report out.json] [--junit out.xml] [-v|-vv]
 testkit list [PATTERN] [--tag t]     <span class="c"># resolved run plan, no execution</span>
 testkit validate [--live]            <span class="c"># static checks; --live dry-runs seeds, rolled back</span>
 testkit env [--env name]             <span class="c"># print mock/dependency URLs to export before starting target</span></code></pre>
 <p>Exit codes: <code>0</code> pass · <code>1</code> a test failed · <code>2</code> config/usage error (including an empty <code>run</code> selection) · <code>3</code> environment/preflight/report/harness error · <code>130</code> interrupted. An empty run names its pattern and tags before any runtime or preflight work; the same <code>list</code> filter reports zero matches and exits <code>0</code>. All requested JSON and JUnit writes are attempted, and any write failure exits <code>3</code> without removing a successful sibling report.</p>
+<p>Terminal styling is selected independently for stdout and stderr, and redirected streams are plain by default. <code>--no-color</code>, non-empty <code>NO_COLOR</code>, and <code>CLICOLOR=0</code> disable ANSI output in that precedence order and override <code>CLICOLOR_FORCE</code>. Unicode glyphs and table borders remain unchanged.</p>
 <p><code>--step</code> pauses after seeding, after arming mocks, after every step, and before end-state verification:</p>
 <div class="tablewrap"><table>
   <tr><th>Command</th><th>Effect</th></tr>
@@ -479,7 +481,7 @@ testkit env [--env name]             <span class="c"># print mock/dependency URL
   <tr><td>Redis</td><td><code>redis</code> (tokio, ConnectionManager)</td><td>Auto-reconnect fits long runs; SCAN/FLUSHDB/typed reads.</td></tr>
   <tr><td>JSON tooling</td><td><code>serde_json_path</code>, own <code>jsondiff</code></td><td>RFC 9535 JSONPath; ~200 lines of diffing we should own so reports get structured <code>FieldDiff</code>s.</td></tr>
   <tr><td>Diagnostics</td><td><code>thiserror</code>/<code>anyhow</code>, <code>tracing</code></td><td>Typed errors at boundaries; spans per test/step, JSON log layer for CI.</td></tr>
-  <tr><td>Terminal</td><td><code>comfy-table</code>, <code>owo-colors</code>, <code>indicatif</code>, <code>rustyline</code></td><td>Diff tables, NO_COLOR-respecting color, progress, the step-mode prompt.</td></tr>
+  <tr><td>Terminal</td><td><code>anstream</code>, <code>comfy-table</code>, <code>owo-colors</code>, <code>indicatif</code>, <code>rustyline</code></td><td>Adaptive color, plain redirected output, diff tables, progress, and the step-mode prompt.</td></tr>
 </table></div>
 
 <h2 id="s8"><span class="no">8</span>Implementation roadmap</h2>

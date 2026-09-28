@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anstream::eprintln;
 use indexmap::IndexMap;
 use owo_colors::OwoColorize;
 use vault_dsl::Environment;
