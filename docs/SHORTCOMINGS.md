@@ -20,20 +20,24 @@ reason, fix, pull request, and first fixed release remain traceable.
 
 | Order | ID | Status | Effort | Shortcoming |
 | ---: | --- | --- | --- | --- |
-| 1 | VLT-001 | Open | XS | Empty test selections exit successfully |
-| 2 | VLT-002 | Open | XS | Requested report write failures do not fail the run |
-| 3 | VLT-003 | Open | S | Missing environment values are resolved leniently |
-| 4 | VLT-004 | Open | S | Static validation is not environment-aware |
-| 5 | VLT-005 | Open | M | Write-capable tests have no enforced safety gate |
-| 6 | VLT-006 | Open | M | Mock recordings can expose secrets in failure reports |
-| 7 | VLT-007 | Open | M | Failure matrices require duplicated tests |
-| 8 | VLT-008 | Open | L | Target process lifecycle is external to Vault |
-| 9 | VLT-009 | Open | L | Concurrent request scenarios cannot be expressed |
-| 10 | VLT-010 | Open | M | Windows has no prebuilt npm binary |
-| 11 | VLT-011 | Accepted limitation | L | State verification supports only Postgres and Redis |
-| 12 | VLT-012 | Accepted limitation | L | Target in-process state cannot be reset by Vault |
+| 1 | VLT-001 | Done | XS | Empty test selections exit successfully |
+| 2 | VLT-002 | Done | XS | Requested report write failures do not fail the run |
+| 3 | VLT-013 | Open | M | SQL-file seed fixtures are insufficiently validated |
+| 4 | VLT-003 | Open | S | Missing environment values are resolved leniently |
+| 5 | VLT-004 | Open | S | Static validation is not environment-aware |
+| 6 | VLT-005 | Open | M | Write-capable tests have no enforced safety gate |
+| 7 | VLT-006 | Open | M | Mock recordings can expose secrets in failure reports |
+| 8 | VLT-007 | Open | M | Failure matrices require duplicated tests |
+| 9 | VLT-008 | Open | L | Target process lifecycle is external to Vault |
+| 10 | VLT-009 | Open | L | Concurrent request scenarios cannot be expressed |
+| 11 | VLT-010 | Open | M | Windows has no prebuilt npm binary |
+| 12 | VLT-011 | Accepted limitation | L | State verification supports only Postgres and Redis |
+| 13 | VLT-012 | Accepted limitation | L | Target in-process state cannot be reset by Vault |
 
 ## VLT-001: Empty test selections exit successfully
+
+**Completed.** Fixed by [PR #10](https://github.com/AmreetKumarkhuntia/vault/pull/10) and first
+released in v0.3.3.
 
 **Problem.** A misspelled pattern or tag can select no tests. The runner builds an empty result,
 whose folded status is `PASSED`, and exits `0`.
@@ -55,6 +59,9 @@ opt-in only if a demonstrated workflow genuinely needs empty selections.
 
 ## VLT-002: Requested report write failures do not fail the run
 
+**Completed.** Fixed by [PR #10](https://github.com/AmreetKumarkhuntia/vault/pull/10) and first
+released in v0.3.3.
+
 **Problem.** Failure to write a configured JSON or JUnit report only prints a warning; the test
 result still determines the exit code.
 
@@ -72,6 +79,50 @@ shown together.
 - An unwritable JSON or JUnit path makes the command exit `3`.
 - All requested report writes are attempted and every failure is printed.
 - Successful report generation keeps the underlying test exit code.
+
+## VLT-013: SQL-file seed fixtures are insufficiently validated
+
+**Problem.** Postgres accepts `sql_file` seed entries, but malformed entries can pass static
+validation, paths are not constrained to the suite root, and no automated test proves file-backed
+execution. Database errors also omit the seed index and fixture filename.
+
+**Risk.** A fixture can silently do nothing, read an unintended local file, escape the surrounding
+seed transaction, or fail in CI with a diagnostic that does not identify its source. Ordering and
+rollback regressions can ship undetected.
+
+**Evidence.** `crates/store-postgres/src/lib.rs` joins the configured suite root to the supplied
+path and executes the contents with `raw_sql`, but validation checks only for the presence of
+`sql_file`; it does not validate its type or path. There is no SQL fixture scenario under
+`tests/flows/fixtures` and no external driver test covering success, rejection, ordering, or
+rollback.
+
+**Proposed resolution.** After config-time environment interpolation, define `sql_file` as a
+static, UTF-8, suite-root-relative `.sql` reference. Validate its shape, canonical path,
+containment, and contents before connecting to external services. Execute file, inline-SQL, and
+structured-row entries in declaration order under the driver-owned seed transaction, rejecting
+transaction-control statements that could escape it. Preserve logical and resolved paths in
+validation and runtime errors.
+
+**Migration impact.** Absolute and parent-relative SQL-file references currently work. Enforcing
+the suite boundary is intentionally backward-incompatible; release notes must tell users to move
+those fixtures beneath the suite root and update their references.
+
+**Acceptance criteria.**
+
+- Relative paths resolve from the directory containing `vault.yaml`, independent of process CWD.
+- Empty, non-string, missing, absolute, parent-traversing, non-SQL, non-UTF-8, runtime-template
+  (`{{ ... }}`), and suite-escaping references fail static validation with the seed index and path.
+- SQL files may contain multiple statements and compose in declaration order with inline SQL and
+  structured rows inside one seed transaction.
+- Top-level transaction-control statements cannot commit, roll back, or otherwise take ownership
+  of Vault's seed transaction.
+- Read and SQL errors identify the logical and resolved fixture paths; a failed entry rolls back
+  earlier entries.
+- External validation tests, a live Postgres driver matrix, and a full-stack demo scenario run in
+  CI.
+
+**Non-goals.** This item does not add generic YAML `fixture:` entries, `$include` expansion,
+templating inside SQL files, or `psql` meta-command support.
 
 ## VLT-003: Missing environment values are resolved leniently
 
@@ -288,4 +339,3 @@ The following findings belong in the adopting repository or application, not thi
 - The unconfirmed claim that Vault 0.3.2 does not interpolate `${env...}` in test files. The
   common parser currently applies config-time interpolation to every YAML file; preserve a minimal
   reproduction before opening a separate defect.
-

@@ -74,9 +74,8 @@ LOAD ─▶ VALIDATE ─▶ RESET ─▶ SEED ─▶ ARM_MOCKS ─▶ RUN_STEPS 
 ```
 tests/
   testkit.yaml              # global config (one per project root)
-  fixtures/                 # seed fragments, mock fragments, .sql files (not discovered as tests)
+  fixtures/                 # PostgreSQL .sql seed files (not discovered as tests)
   orders/
-    _suite.yaml             # optional per-directory defaults (tags, shared seeds/mocks, timeouts)
     create_order.test.yaml  # one test per file (recommended); a file MAY hold `tests: [...]`
 ```
 
@@ -135,7 +134,6 @@ seed:
       conflict: error                             # error (default) | ignore | update
       rows:
         - { id: 1, email: alice@example.com, status: active, created_at: "{{ now() }}" }
-    - fixture: fixtures/users.seed.yaml           # include a fragment (list of these entries)
 ```
 
 `null` → SQL NULL; nested maps/lists → json/jsonb; `!base64` for bytea. Templating applies (`{{ uuid() }}`, `{{ vars.* }}`) but **step captures are statically rejected in seeds** (seeds run before steps).
@@ -266,7 +264,10 @@ verify:
 
 ### 2.9 Reuse
 
-YAML anchors (native, within file) · `fixture: <path>` list items in seeds/mocks · `{$include: path, with: {overrides}}` deep-merge for any mapping · `_suite.yaml` defaults (lists prepend, scalars are overridden). No test inheritance or `matrix:` in v1 (key reserved).
+YAML anchors are available natively within a file. PostgreSQL `sql_file` is the only currently
+supported file-backed seed mechanism. Generic YAML `fixture:` entries, `$include` deep-merge, and
+`_suite.yaml` inheritance are planned capabilities, not implemented behavior. There is no test
+inheritance or `matrix:` in v1 (`matrix` is reserved).
 
 ### 2.10 Full example
 
@@ -669,7 +670,7 @@ testkit env [--env name]           # print MOCK_*/dependency URLs to export befo
 | **M4 — Mock server + outbound verification** | axum listener, MockHub/Session/guards, order-based matching, `times`/`responses` sequences, unconditional recording, `unmatched: fail` (599), `verify.calls` assignment algorithm + near-misses + `ordered:`, `testkit env`. | The full example test in §2.10 minus Redis runs green, and a missed/unexpected call renders with component diffs. |
 | **M5 — Redis + eventual consistency + watch** | Redis driver (seed/verify/FLUSHDB reset, prefix fallback), `eventually:` shared poll loop with settle semantics, `watch:` snapshot mode. | Async-writing target passes with `eventually:`; a stray write to a watched table fails with UNEXPECTED_CHANGE. |
 | **M6 — Flows (cross-test data)** | `*.flow.yaml` schema + validation (export/`flow.*` reference checks), flow runner with `reset: once` isolation, `with:` var injection, per-stage mock sessions, SKIPPED propagation, flow-aware `run`/`list`/`--shuffle`/`--step`. | The create→update→delete lifecycle flow runs green reusing `order_id` across tests; killing stage 1 marks stages 2-3 SKIPPED. |
-| **M7 — DX & CI polish** | `--step` mode REPL, `--break-at`, tag/glob filtering, `--shuffle`, JUnit output, suite `_suite.yaml` defaults, `$include`/fixtures, JSON Schema publication, secret redaction in reports, docs. | A QA engineer onboards from docs alone and debugs a failing async test with `--step` + `verify`. |
+| **M7 — DX & CI polish** | `--step` mode REPL, `--break-at`, tag/glob filtering, `--shuffle`, JUnit output, JSON Schema publication, secret redaction in reports, docs. Generic YAML includes and per-directory defaults remain future work. | A QA engineer onboards from docs alone and debugs a failing async test with `--step` + `verify`. |
 
 ---
 
