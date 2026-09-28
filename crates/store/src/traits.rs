@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,6 +61,21 @@ pub trait StoreDriver: Send + Sync {
     /// Static validation at suite-load time. Templates appear as placeholder
     /// strings; no I/O happens here.
     fn validate(&self, doc: &StoreDoc, mode: DocMode) -> Result<(), ValidationError>;
+
+    /// Suite-aware validation for drivers with file-backed documents.
+    ///
+    /// The provided implementation preserves compatibility for existing
+    /// drivers by delegating to [`StoreDriver::validate`]. Drivers that need a
+    /// filesystem boundary can override this method while legacy callers can
+    /// continue using `validate`.
+    fn validate_with_suite_root(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        _suite_root: &Path,
+    ) -> Result<(), ValidationError> {
+        self.validate(doc, mode)
+    }
 
     async fn connect(&self, cfg: &StoreConnConfig) -> Result<Arc<dyn StateStore>, StoreError>;
 }

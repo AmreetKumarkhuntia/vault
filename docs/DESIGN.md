@@ -136,7 +136,15 @@ seed:
         - { id: 1, email: alice@example.com, status: active, created_at: "{{ now() }}" }
 ```
 
-`null` → SQL NULL; nested maps/lists → json/jsonb; `!base64` for bytea. Templating applies (`{{ uuid() }}`, `{{ vars.* }}`) but **step captures are statically rejected in seeds** (seeds run before steps).
+`sql_file` is a static UTF-8 `.sql` file resolved from the canonical suite root. Absolute paths,
+parent traversal, symlink escape, and template expressions in the path are rejected during static
+validation. Its contents may contain multiple PostgreSQL statements but not `psql` meta-commands;
+file contents are not templated. Top-level transaction-control statements are rejected so all
+entries execute in declaration order under Vault's one seed transaction.
+
+`null` → SQL NULL; nested maps/lists → json/jsonb; `!base64` for bytea. Templating applies to
+inline structured/SQL values (`{{ uuid() }}`, `{{ vars.* }}`) but **step captures are statically
+rejected in seeds** (seeds run before steps).
 
 **Redis** — one entry = one key:
 
@@ -435,6 +443,14 @@ pub trait StoreDriver: Send + Sync {
     fn kind(&self) -> &'static str;
     /// Static validation at suite-load time, templates as placeholders, no I/O.
     fn validate(&self, doc: &StoreDoc, mode: DocMode) -> Result<(), ValidationError>;
+    /// Suite-aware validation for file-backed documents. Existing drivers inherit
+    /// a default implementation that delegates to `validate`.
+    fn validate_with_suite_root(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        suite_root: &Path,
+    ) -> Result<(), ValidationError>;
     async fn connect(&self, cfg: &StoreConnConfig) -> Result<Arc<dyn StateStore>, StoreError>;
 }
 

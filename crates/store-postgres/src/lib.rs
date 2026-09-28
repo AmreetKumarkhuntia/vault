@@ -1,6 +1,7 @@
 //! Postgres driver: seeding, TRUNCATE isolation, and expectation-driven
 //! verification with near-miss reporting.
 
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,6 +20,44 @@ impl StoreDriver for PostgresDriver {
     }
 
     fn validate(&self, doc: &StoreDoc, mode: DocMode) -> Result<(), ValidationError> {
+        self.validate_impl(doc, mode, None)
+    }
+
+    fn validate_with_suite_root(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        suite_root: &Path,
+    ) -> Result<(), ValidationError> {
+        self.validate_impl(doc, mode, Some(suite_root))
+    }
+
+    async fn connect(&self, cfg: &StoreConnConfig) -> Result<Arc<dyn StateStore>, StoreError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&cfg.url)
+            .await
+            .map_err(|e| StoreError::Connection(format!("postgres: {e}")))?;
+        Ok(Arc::new(PostgresStore {
+            alias: cfg.alias.clone(),
+            pool,
+            suite_root: cfg
+                .options
+                .get("suite_root")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        }))
+    }
+}
+
+impl PostgresDriver {
+    fn validate_impl(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        suite_root: Option<&Path>,
+    ) -> Result<(), ValidationError> {
         match mode {
             DocMode::Seed => {
                 let entries = doc.as_array().ok_or_else(|| {
@@ -35,17 +74,93 @@ impl StoreDriver for PostgresDriver {
                             return Err(ValidationError::new(&path, format!("unknown key `{k}`")));
                         }
                     }
-                    if m.contains_key("table") && !m.contains_key("rows") {
-                        return Err(ValidationError::new(&path, "`table` needs `rows`"));
-                    }
-                    if !m.contains_key("table")
-                        && !m.contains_key("sql")
-                        && !m.contains_key("sql_file")
-                    {
+
+                    let variants: Vec<&str> = ["table", "sql", "sql_file"]
+                        .into_iter()
+                        .filter(|key| m.contains_key(*key))
+                        .collect();
+                    if variants.len() != 1 {
                         return Err(ValidationError::new(
                             &path,
-                            "needs table+rows, sql, or sql_file",
+                            "needs exactly one of `table`, `sql`, or `sql_file`",
                         ));
+                    }
+
+                    match variants[0] {
+                        "table" => {
+                            non_empty_string(m.get("table"), &format!("{path}.table"))?;
+                            let rows =
+                                m.get("rows").and_then(Value::as_array).ok_or_else(|| {
+                                    ValidationError::new(format!("{path}.rows"), "must be a list")
+                                })?;
+                            for (row_index, row) in rows.iter().enumerate() {
+                                if !row.is_object() {
+                                    return Err(ValidationError::new(
+                                        format!("{path}.rows[{row_index}]"),
+                                        "must be a mapping",
+                                    ));
+                                }
+                            }
+                            if m.contains_key("conflict") {
+                                non_empty_string(m.get("conflict"), &format!("{path}.conflict"))?;
+                            }
+                        }
+                        "sql" => {
+                            reject_table_options(m, &path)?;
+                            let sql = non_empty_string(m.get("sql"), &format!("{path}.sql"))?;
+                            reject_transaction_control(sql).map_err(|command| {
+                                ValidationError::new(
+                                    format!("{path}.sql"),
+                                    transaction_control_message(command),
+                                )
+                            })?;
+                        }
+                        "sql_file" => {
+                            reject_table_options(m, &path)?;
+                            let logical =
+                                non_empty_string(m.get("sql_file"), &format!("{path}.sql_file"))?;
+
+                            if let Some(root) = suite_root {
+                                let resolved =
+                                    resolve_sql_file(root, logical).map_err(|error| {
+                                        ValidationError::new(
+                                            format!("{path}.sql_file"),
+                                            format!(
+                                                "`{logical}` resolved as `{}`: {}",
+                                                error.resolved_path.display(),
+                                                error.message
+                                            ),
+                                        )
+                                    })?;
+                                let sql = read_sql_file(&resolved).map_err(|e| {
+                                    ValidationError::new(
+                                        format!("{path}.sql_file"),
+                                        format!(
+                                            "`{logical}` resolved to `{}`: could not read UTF-8 SQL file: {e}",
+                                            resolved.display()
+                                        ),
+                                    )
+                                })?;
+                                reject_transaction_control(&sql).map_err(|command| {
+                                    ValidationError::new(
+                                        format!("{path}.sql_file"),
+                                        format!(
+                                            "`{logical}` resolved to `{}`: {}",
+                                            resolved.display(),
+                                            transaction_control_message(command)
+                                        ),
+                                    )
+                                })?;
+                            } else {
+                                validate_sql_file_reference(logical).map_err(|message| {
+                                    ValidationError::new(
+                                        format!("{path}.sql_file"),
+                                        format!("`{logical}`: {message}"),
+                                    )
+                                })?;
+                            }
+                        }
+                        _ => unreachable!("validated postgres seed variant"),
                     }
                 }
                 Ok(())
@@ -74,30 +189,12 @@ impl StoreDriver for PostgresDriver {
             _ => Ok(()),
         }
     }
-
-    async fn connect(&self, cfg: &StoreConnConfig) -> Result<Arc<dyn StateStore>, StoreError> {
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&cfg.url)
-            .await
-            .map_err(|e| StoreError::Connection(format!("postgres: {e}")))?;
-        Ok(Arc::new(PostgresStore {
-            alias: cfg.alias.clone(),
-            pool,
-            suite_root: cfg
-                .options
-                .get("suite_root")
-                .and_then(Value::as_str)
-                .unwrap_or(".")
-                .to_string(),
-        }))
-    }
 }
 
 pub struct PostgresStore {
     alias: String,
     pool: PgPool,
-    suite_root: String,
+    suite_root: PathBuf,
 }
 
 #[async_trait]
@@ -162,44 +259,108 @@ impl StateStore for PostgresStore {
     }
 
     async fn seed(&self, doc: &StoreDoc) -> Result<SeedReceipt, StoreError> {
+        PostgresDriver
+            .validate_with_suite_root(doc, DocMode::Seed, &self.suite_root)
+            .map_err(|e| StoreError::Harness(e.to_string()))?;
         let entries = doc
             .as_array()
             .ok_or_else(|| StoreError::Harness("seed.postgres must be a list".into()))?;
         let mut receipt = SeedReceipt::default();
         let mut tx = self.pool.begin().await.map_err(db_err)?;
 
-        for entry in entries {
-            if let Some(sql) = entry.get("sql").and_then(Value::as_str) {
-                sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db_err)?;
-                receipt.entries.push("postgres: executed inline sql".into());
-            } else if let Some(file) = entry.get("sql_file").and_then(Value::as_str) {
-                let path = std::path::Path::new(&self.suite_root).join(file);
-                let sql = std::fs::read_to_string(&path).map_err(|e| {
-                    StoreError::Harness(format!("seed sql_file {}: {e}", path.display()))
-                })?;
-                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db_err)?;
-                receipt.entries.push(format!("postgres: executed {file}"));
-            } else if let Some(table) = entry.get("table").and_then(Value::as_str) {
-                let rows = entry.get("rows").and_then(Value::as_array).ok_or_else(|| {
-                    StoreError::Harness(format!("seed table `{table}`: rows missing"))
-                })?;
-                let conflict = entry
-                    .get("conflict")
-                    .and_then(Value::as_str)
-                    .unwrap_or("error");
-                for row in rows {
-                    insert_row(&mut tx, table, row, conflict).await?;
+        let execution: Result<(), StoreError> = async {
+            for (index, entry) in entries.iter().enumerate() {
+                if let Some(sql) = entry.get("sql").and_then(Value::as_str) {
+                    reject_transaction_control(sql).map_err(|command| {
+                        StoreError::Harness(format!(
+                            "seed.postgres[{index}].sql: {}",
+                            transaction_control_message(command)
+                        ))
+                    })?;
+                    set_standard_conforming_strings(&mut tx)
+                        .await
+                        .map_err(|e| {
+                            StoreError::Harness(format!(
+                                "seed.postgres[{index}].sql: could not enforce standard string parsing: {e}"
+                            ))
+                        })?;
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| {
+                            StoreError::Harness(format!(
+                                "seed.postgres[{index}].sql: postgres: {e}"
+                            ))
+                        })?;
+                    receipt.entries.push("postgres: executed inline sql".into());
+                } else if let Some(file) = entry.get("sql_file").and_then(Value::as_str) {
+                    let path = resolve_sql_file(&self.suite_root, file).map_err(|error| {
+                        StoreError::Harness(format!(
+                            "seed.postgres[{index}].sql_file `{file}` resolved as `{}`: {}",
+                            error.resolved_path.display(),
+                            error.message
+                        ))
+                    })?;
+                    let sql = read_sql_file(&path).map_err(|e| {
+                        StoreError::Harness(format!(
+                            "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: could not read UTF-8 SQL file: {e}",
+                            path.display()
+                        ))
+                    })?;
+                    reject_transaction_control(&sql).map_err(|command| {
+                        StoreError::Harness(format!(
+                            "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: {}",
+                            path.display(),
+                            transaction_control_message(command)
+                        ))
+                    })?;
+                    set_standard_conforming_strings(&mut tx)
+                        .await
+                        .map_err(|e| {
+                            StoreError::Harness(format!(
+                                "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: could not enforce standard string parsing: {e}",
+                                path.display()
+                            ))
+                        })?;
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| {
+                            StoreError::Harness(format!(
+                                "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: postgres: {e}",
+                                path.display()
+                            ))
+                        })?;
+                    receipt.entries.push(format!("postgres: executed {file}"));
+                } else if let Some(table) = entry.get("table").and_then(Value::as_str) {
+                    let rows = entry.get("rows").and_then(Value::as_array).ok_or_else(|| {
+                        StoreError::Harness(format!(
+                            "seed.postgres[{index}] table `{table}`: rows missing"
+                        ))
+                    })?;
+                    let conflict = entry
+                        .get("conflict")
+                        .and_then(Value::as_str)
+                        .unwrap_or("error");
+                    for row in rows {
+                        insert_row(&mut tx, table, row, conflict).await?;
+                    }
+                    receipt
+                        .entries
+                        .push(format!("postgres: {table} +{} rows", rows.len()));
                 }
-                receipt
-                    .entries
-                    .push(format!("postgres: {table} +{} rows", rows.len()));
             }
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = execution {
+            return match tx.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(StoreError::Harness(format!(
+                    "{error}; rollback failed: postgres: {rollback_error}"
+                ))),
+            };
         }
         tx.commit().await.map_err(db_err)?;
         Ok(receipt)
@@ -336,6 +497,352 @@ impl StateStore for PostgresStore {
         }
         Ok(table)
     }
+}
+
+fn non_empty_string<'a>(
+    value: Option<&'a Value>,
+    yaml_path: &str,
+) -> Result<&'a str, ValidationError> {
+    let value = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| ValidationError::new(yaml_path, "must be a string"))?;
+    if value.trim().is_empty() {
+        return Err(ValidationError::new(yaml_path, "must not be empty"));
+    }
+    Ok(value)
+}
+
+fn reject_table_options(
+    entry: &Map<String, Value>,
+    yaml_path: &str,
+) -> Result<(), ValidationError> {
+    for key in ["rows", "conflict"] {
+        if entry.contains_key(key) {
+            return Err(ValidationError::new(
+                format!("{yaml_path}.{key}"),
+                "is only valid with `table`",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_sql_file(path: &Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
+async fn set_standard_conforming_strings(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
+    // Plain-string backslash semantics are a server setting. Pin them before
+    // every raw entry so the offline lexer and PostgreSQL parse the same text,
+    // even if a preceding fixture changed the session setting.
+    sqlx::query("SET LOCAL standard_conforming_strings = on")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+fn transaction_control_message(command: &str) -> String {
+    format!(
+        "top-level transaction-control statement `{command}` is not allowed; Vault manages the seed transaction"
+    )
+}
+
+/// Reject commands that can create, end, or otherwise take ownership of the
+/// transaction wrapped around a Postgres seed document. This is deliberately
+/// a lexer rather than a substring search: transaction keywords in data,
+/// comments, identifiers, and function bodies are not statements.
+fn reject_transaction_control(sql: &str) -> Result<(), &'static str> {
+    const TOKEN_LIMIT: usize = 5;
+
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::with_capacity(TOKEN_LIMIT);
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index..].starts_with(b"--") {
+            index = skip_line_comment(bytes, index + 2);
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            index = skip_block_comment(bytes, index + 2);
+            continue;
+        }
+        if bytes[index] == b';' {
+            if let Some(command) = transaction_control_command(&tokens) {
+                return Err(command);
+            }
+            tokens.clear();
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            push_sql_token(&mut tokens, "<literal>", TOKEN_LIMIT);
+            let escape_backslashes = is_escape_string_prefix(bytes, index);
+            index = skip_single_quoted(bytes, index + 1, escape_backslashes);
+            continue;
+        }
+        if bytes[index] == b'"' {
+            push_sql_token(&mut tokens, "<identifier>", TOKEN_LIMIT);
+            index = skip_double_quoted(bytes, index + 1);
+            continue;
+        }
+        if bytes[index] == b'$' {
+            if let Some(delimiter_end) = dollar_quote_delimiter_end(bytes, index) {
+                push_sql_token(&mut tokens, "<dollar-quoted>", TOKEN_LIMIT);
+                index = skip_dollar_quoted(bytes, index, delimiter_end);
+                continue;
+            }
+        }
+        if is_identifier_start(bytes[index]) {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && is_identifier_continue(bytes[index]) {
+                index += 1;
+            }
+            if tokens.len() < TOKEN_LIMIT {
+                tokens.push(String::from_utf8_lossy(&bytes[start..index]).to_ascii_uppercase());
+            }
+            continue;
+        }
+
+        push_sql_token(&mut tokens, "<other>", TOKEN_LIMIT);
+        index += 1;
+    }
+
+    match transaction_control_command(&tokens) {
+        Some(command) => Err(command),
+        None => Ok(()),
+    }
+}
+
+fn push_sql_token(tokens: &mut Vec<String>, token: &str, limit: usize) {
+    if tokens.len() < limit {
+        tokens.push(token.to_string());
+    }
+}
+
+fn transaction_control_command(tokens: &[String]) -> Option<&'static str> {
+    let first = tokens.first()?.as_str();
+    match first {
+        "BEGIN" => Some("BEGIN"),
+        "START" if token_is(tokens, 1, "TRANSACTION") => Some("START TRANSACTION"),
+        "COMMIT" => Some("COMMIT"),
+        "END" => Some("END"),
+        "ROLLBACK" => Some("ROLLBACK"),
+        "ABORT" => Some("ABORT"),
+        "SAVEPOINT" => Some("SAVEPOINT"),
+        "RELEASE" => Some("RELEASE SAVEPOINT"),
+        "PREPARE" if token_is(tokens, 1, "TRANSACTION") => Some("PREPARE TRANSACTION"),
+        "SET" if token_is(tokens, 1, "TRANSACTION") => Some("SET TRANSACTION"),
+        "SET"
+            if token_is(tokens, 1, "SESSION")
+                && token_is(tokens, 2, "CHARACTERISTICS")
+                && token_is(tokens, 3, "AS")
+                && token_is(tokens, 4, "TRANSACTION") =>
+        {
+            Some("SET SESSION CHARACTERISTICS AS TRANSACTION")
+        }
+        _ => None,
+    }
+}
+
+fn token_is(tokens: &[String], index: usize, expected: &str) -> bool {
+    tokens.get(index).is_some_and(|token| token == expected)
+}
+
+fn skip_line_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+        index += 1;
+    }
+    index
+}
+
+fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
+    let mut depth = 1usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"/*") {
+            depth += 1;
+            index += 2;
+        } else if bytes[index..].starts_with(b"*/") {
+            depth -= 1;
+            index += 2;
+            if depth == 0 {
+                break;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn skip_single_quoted(bytes: &[u8], mut index: usize, escape_backslashes: bool) -> usize {
+    while index < bytes.len() {
+        if escape_backslashes && bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+        } else if bytes[index] == b'\'' {
+            if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn skip_double_quoted(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            if bytes.get(index + 1) == Some(&b'"') {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn is_escape_string_prefix(bytes: &[u8], quote_index: usize) -> bool {
+    quote_index > 0
+        && matches!(bytes[quote_index - 1], b'e' | b'E')
+        && (quote_index == 1 || !is_identifier_continue(bytes[quote_index - 2]))
+}
+
+fn dollar_quote_delimiter_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if start > 0 && is_identifier_continue(bytes[start - 1]) {
+        return None;
+    }
+    let mut index = start + 1;
+    if bytes.get(index) == Some(&b'$') {
+        return Some(index + 1);
+    }
+    if !bytes
+        .get(index)
+        .is_some_and(|byte| is_identifier_start(*byte))
+    {
+        return None;
+    }
+    index += 1;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| is_dollar_tag_continue(*byte))
+    {
+        index += 1;
+    }
+    (bytes.get(index) == Some(&b'$')).then_some(index + 1)
+}
+
+fn skip_dollar_quoted(bytes: &[u8], start: usize, delimiter_end: usize) -> usize {
+    let delimiter = &bytes[start..delimiter_end];
+    let mut index = delimiter_end;
+    while index + delimiter.len() <= bytes.len() {
+        if &bytes[index..index + delimiter.len()] == delimiter {
+            return index + delimiter.len();
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn is_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || !byte.is_ascii()
+}
+
+fn is_identifier_continue(byte: u8) -> bool {
+    is_identifier_start(byte) || byte.is_ascii_digit() || byte == b'$'
+}
+
+fn is_dollar_tag_continue(byte: u8) -> bool {
+    is_identifier_start(byte) || byte.is_ascii_digit()
+}
+
+#[derive(Debug)]
+struct SqlFileResolutionError {
+    resolved_path: PathBuf,
+    message: String,
+}
+
+fn sql_file_resolution_error(
+    resolved_path: impl Into<PathBuf>,
+    message: impl Into<String>,
+) -> SqlFileResolutionError {
+    SqlFileResolutionError {
+        resolved_path: resolved_path.into(),
+        message: message.into(),
+    }
+}
+
+fn validate_sql_file_reference(logical_path: &str) -> Result<(), String> {
+    let relative = Path::new(logical_path);
+    if logical_path.contains("{{") || logical_path.contains("}}") {
+        return Err("must be a static path without template expressions".into());
+    }
+    if relative.is_absolute() {
+        return Err("must be relative to the suite root".into());
+    }
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err("must not contain parent, root, or platform-prefix components".into());
+    }
+    if relative
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("sql")
+    {
+        return Err("must have a `.sql` extension".into());
+    }
+    Ok(())
+}
+
+fn resolve_sql_file(
+    suite_root: &Path,
+    logical_path: &str,
+) -> Result<PathBuf, SqlFileResolutionError> {
+    let relative = Path::new(logical_path);
+    let candidate = suite_root.join(relative);
+
+    validate_sql_file_reference(logical_path)
+        .map_err(|message| sql_file_resolution_error(&candidate, message))?;
+
+    let canonical_root = std::fs::canonicalize(suite_root).map_err(|e| {
+        sql_file_resolution_error(
+            suite_root,
+            format!("could not canonicalize suite root: {e}"),
+        )
+    })?;
+    let resolved = std::fs::canonicalize(&candidate).map_err(|e| {
+        sql_file_resolution_error(&candidate, format!("could not resolve SQL file: {e}"))
+    })?;
+    if !resolved.starts_with(&canonical_root) {
+        return Err(sql_file_resolution_error(
+            resolved,
+            "resolves outside the suite root",
+        ));
+    }
+    if !resolved.is_file() {
+        return Err(sql_file_resolution_error(
+            resolved,
+            "must resolve to a regular file",
+        ));
+    }
+
+    Ok(resolved)
 }
 
 impl PostgresStore {
