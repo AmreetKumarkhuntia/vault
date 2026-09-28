@@ -264,9 +264,8 @@ footer{
 <h3>File layout &amp; global config</h3>
 <pre><code>tests/
   testkit.yaml              <span class="c"># global config: environments, DSNs, mock bind, defaults</span>
-  fixtures/                 <span class="c"># shared seed/mock fragments, .sql files</span>
+  fixtures/                 <span class="c"># PostgreSQL .sql seed files</span>
   orders/
-    _suite.yaml             <span class="c"># optional per-directory defaults (tags, shared seeds, timeouts)</span>
     create_order.test.yaml  <span class="c"># one test per file</span></code></pre>
 <p><code>testkit.yaml</code> holds environments (<code>local</code>, <code>ci</code>, …) with the target base URL + health check, Postgres/Redis URLs, and the mock bind address. Connection strings live <em>only</em> here — a test file can never silently point at production. Layering: CLI flags &gt; <code>TESTKIT_*</code> env vars &gt; <code>testkit.yaml</code>.</p>
 
@@ -351,7 +350,7 @@ footer{
 <ul>
   <li><strong>minijinja</strong>, expressions only (<code>{{ }}</code>; logic blocks rejected in v1 — tests stay declarative). Namespaces: <code>vars.*</code>, <code>steps.&lt;name&gt;.captures.*</code> (plus flat shorthand), <code>mock.&lt;dep&gt;.base_url</code>, allow-listed <code>env.*</code>; builtins <code>uuid()</code>, <code>now()</code> (frozen per test so <code>!near-now</code> has a stable anchor), <code>random_int()</code>.</li>
   <li><strong>Typing rule:</strong> a scalar that is exactly one expression substitutes the native JSON value — captured numbers stay numbers, which is what makes DB matchers work.</li>
-  <li><strong>Reuse:</strong> YAML anchors, <code>fixture:</code> file includes for seeds/mocks, <code>{$include: path, with: {…}}</code> deep-merge, and <code>_suite.yaml</code> defaults. No test inheritance in v1.</li>
+  <li><strong>Reuse:</strong> YAML anchors work within a file. PostgreSQL <code>sql_file</code> is the only currently supported file-backed seed mechanism. Generic YAML <code>fixture:</code>, <code>$include</code>, and <code>_suite.yaml</code> inheritance are planned, not implemented. No test inheritance in v1.</li>
 </ul>
 
 <h3>Chaining tests: flows (use one test's data in the next)</h3>
@@ -493,7 +492,7 @@ testkit env [--env name]             <span class="c"># print mock/dependency URL
   <tr><td>M4 · Mock server</td><td>Listener, sessions with Drop-guards, ordered matching, response sequences, unconditional recording, 599 unmatched, <code>verify.calls</code>, <code>testkit env</code></td><td>Full §3 example (minus Redis) green; a missed/unexpected call renders with component diffs</td></tr>
   <tr><td>M5 · Redis + async</td><td>Redis driver, <code>eventually:</code> shared poll loop with settle semantics, <code>watch:</code> snapshots</td><td>Async-writing endpoint passes with <code>eventually:</code>; a stray write to a watched table fails</td></tr>
   <tr><td>M6 · Flows</td><td><code>*.flow.yaml</code> schema + export validation, flow runner with <code>reset: once</code>, <code>with:</code> var injection, per-stage mock sessions, SKIPPED propagation, flow-aware run/list/shuffle/step</td><td>Create→update→delete flow runs green reusing <code>order_id</code> across tests; a failed stage 1 marks stages 2–3 SKIPPED</td></tr>
-  <tr><td>M7 · DX &amp; CI polish</td><td><code>--step</code> REPL, <code>--break-at</code>, filters, <code>--shuffle</code>, JUnit, includes/fixtures, JSON Schema for editors, secret redaction, docs</td><td>A QA engineer onboards from docs alone and debugs a failing async test with <code>--step</code></td></tr>
+  <tr><td>M7 · DX &amp; CI polish</td><td><code>--step</code> REPL, <code>--break-at</code>, filters, <code>--shuffle</code>, JUnit, JSON Schema for editors, secret redaction, docs. Generic YAML includes and per-directory defaults remain future work.</td><td>A QA engineer onboards from docs alone and debugs a failing async test with <code>--step</code></td></tr>
 </table></div>
 
 <h2 id="s9"><span class="no">9</span>Risks &amp; decided defaults</h2>
