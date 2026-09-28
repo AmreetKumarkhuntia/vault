@@ -1,0 +1,13 @@
+SELECT 'COMMIT; ROLLBACK; BEGIN;';
+SELECT E'escaped quote: \'COMMIT\'';
+SELECT $$COMMIT; ROLLBACK;$$;
+SELECT 1 AS "COMMIT";
+
+-- COMMIT; BEGIN; ROLLBACK;
+/* BEGIN; nested /* SAVEPOINT hidden; */ RELEASE; END; */
+
+DO $vault_body$
+BEGIN
+    RAISE NOTICE 'COMMIT; ROLLBACK;';
+END
+$vault_body$;

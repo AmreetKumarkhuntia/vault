@@ -22,7 +22,7 @@ reason, fix, pull request, and first fixed release remain traceable.
 | ---: | --- | --- | --- | --- |
 | 1 | VLT-001 | Done | XS | Empty test selections exit successfully |
 | 2 | VLT-002 | Done | XS | Requested report write failures do not fail the run |
-| 3 | VLT-013 | Open | M | SQL-file seed fixtures are insufficiently validated |
+| 3 | VLT-013 | In progress | M | SQL-file seed fixtures are insufficiently validated |
 | 4 | VLT-003 | Open | S | Missing environment values are resolved leniently |
 | 5 | VLT-004 | Open | S | Static validation is not environment-aware |
 | 6 | VLT-005 | Open | M | Write-capable tests have no enforced safety gate |
@@ -81,6 +81,11 @@ shown together.
 - Successful report generation keeps the underlying test exit code.
 
 ## VLT-013: SQL-file seed fixtures are insufficiently validated
+
+**Implementation in progress.** This branch adds strict entry and contained-path validation,
+UTF-8/read validation, transaction-control rejection, path-rich runtime errors, an external driver
+matrix, and a full-stack SQL fixture scenario. The item remains in progress until the checks pass
+in CI and the change is merged.
 
 **Problem.** Postgres accepts `sql_file` seed entries, but malformed entries can pass static
 validation, paths are not constrained to the suite root, and no automated test proves file-backed

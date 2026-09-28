@@ -105,7 +105,11 @@ fn validate_all(suite: &Suite, reg: &StoreRegistry) -> Vec<String> {
         for (kind, doc) in &t.def.seed {
             match reg.get(kind) {
                 Some(driver) => {
-                    if let Err(e) = driver.validate(doc, vault_store::DocMode::Seed) {
+                    if let Err(e) = driver.validate_with_suite_root(
+                        doc,
+                        vault_store::DocMode::Seed,
+                        &suite.root,
+                    ) {
                         issues.push(format!("{origin}: {e}"));
                     }
                 }
@@ -115,7 +119,11 @@ fn validate_all(suite: &Suite, reg: &StoreRegistry) -> Vec<String> {
         for (kind, doc) in &t.def.verify.stores {
             match reg.get(kind) {
                 Some(driver) => {
-                    if let Err(e) = driver.validate(doc, vault_store::DocMode::Verify) {
+                    if let Err(e) = driver.validate_with_suite_root(
+                        doc,
+                        vault_store::DocMode::Verify,
+                        &suite.root,
+                    ) {
                         issues.push(format!("{origin}: {e}"));
                     }
                 }

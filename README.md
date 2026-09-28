@@ -183,6 +183,26 @@ verify:                           # end-state, evaluated after all steps
   unexpected: fail                # unplanned traffic to mocked deps fails the test
 ```
 
+### PostgreSQL SQL fixtures
+
+Use `sql_file` for multi-statement PostgreSQL setup that is clearer as plain SQL:
+
+```yaml
+seed:
+  postgres:
+    - sql_file: fixtures/sql_file_order.sql
+    - sql: "UPDATE orders SET status = 'fixture-ready' WHERE id = 7101;"
+```
+
+Paths are static and resolve from the suite root—the directory containing `vault.yaml`—not from
+the process working directory or the individual test file. They must be relative `.sql` files
+that remain inside the suite root. Vault validates the reference before connecting to stores,
+then executes SQL-file, inline-SQL, and structured-row entries in declaration order in one
+transaction. Files must be UTF-8 PostgreSQL SQL; `psql` meta-commands and templates inside the
+file are not evaluated. Top-level transaction-control statements are rejected so a fixture cannot
+commit or roll back Vault's seed transaction. See the runnable example in
+`tests/flows/orders/sql_file_seed.test.yaml`.
+
 ### Flows: use one test's data in the next
 
 ```yaml

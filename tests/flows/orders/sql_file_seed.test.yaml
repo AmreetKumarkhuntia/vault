@@ -1,0 +1,31 @@
+test: SQL file fixture seeds an order
+description: A suite-root-relative multi-statement SQL file composes with later seed entries
+tags: [orders, fixtures, smoke]
+
+seed:
+  postgres:
+    - sql_file: fixtures/sql_file_order.sql
+    - sql: "UPDATE orders SET status = 'fixture-ready' WHERE id = 7101;"
+
+steps:
+  - name: fetch fixture order
+    request: { method: GET, path: /api/orders/7101 }
+    expect:
+      status: 200
+      json_partial:
+        id: 7101
+        user_id: 7001
+        status: fixture-ready
+        total_cents: 3200
+        external_charge_id: fixture_charge
+
+verify:
+  postgres:
+    - table: users
+      expect: [{ id: 7001, email: sql-fixture@example.com, status: active, plan: pro }]
+    - table: wallets
+      expect: [{ user_id: 7001, balance_cents: 42000, currency: USD }]
+    - table: orders
+      expect: [{ id: 7101, user_id: 7001, status: fixture-ready, total_cents: 3200 }]
+    - table: audit_log
+      expect: [{ entity: order, entity_id: "7101", action: fixture-loaded }]
