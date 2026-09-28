@@ -1,3 +1,4 @@
+use anstream::println;
 use comfy_table::{presets, Cell, Table};
 use owo_colors::OwoColorize;
 use vault_core::{RunResult, TestResult, TestStatus};

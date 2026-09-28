@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anstream::{eprintln, println};
 use indexmap::IndexMap;
 use owo_colors::OwoColorize;
 use serde_json::{json, Value};

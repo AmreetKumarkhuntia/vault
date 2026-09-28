@@ -1,10 +1,12 @@
+#![deny(clippy::print_stderr, clippy::print_stdout)]
+
 mod gate;
 mod preflight;
 mod runcmd;
 
 use std::ffi::OsString;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -14,6 +16,10 @@ use clap::{Parser, Subcommand};
     after_help = "Quick run: vault --run <SUITE_DIR|vault.yaml> [RUN_OPTIONS]"
 )]
 struct Cli {
+    /// Disable ANSI colors in all terminal output
+    #[arg(long, global = true)]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -70,14 +76,28 @@ enum Command {
 }
 
 fn main() {
+    let args = normalize_quick_run(std::env::args_os());
+    let disable_color = color_disabled(&args);
+    if disable_color {
+        anstream::ColorChoice::Never.write_global();
+    }
+
+    let clap_color = if disable_color {
+        clap::ColorChoice::Never
+    } else {
+        clap::ColorChoice::Auto
+    };
+    let matches = Cli::command().color(clap_color).get_matches_from(args);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+
     tracing_subscriber::fmt()
+        .with_writer(anstream::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
 
-    let cli = Cli::parse_from(normalize_quick_run(std::env::args_os()));
     let code = match cli.command {
         Command::Run {
             pattern,
@@ -117,9 +137,26 @@ fn main() {
 /// supporting the npm-friendly `vault --run <suite>` shorthand.
 fn normalize_quick_run(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut args: Vec<OsString> = args.into_iter().collect();
-    if args.get(1).is_some_and(|arg| arg == "--run") {
-        args[1] = OsString::from("run");
-        args.insert(2, OsString::from("--suite-dir"));
+    let mut index = 1;
+    while args.get(index).is_some_and(|arg| arg == "--no-color") {
+        index += 1;
+    }
+    if args.get(index).is_some_and(|arg| arg == "--run") {
+        args[index] = OsString::from("run");
+        args.insert(index + 1, OsString::from("--suite-dir"));
     }
     args
+}
+
+fn has_no_color(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--no-color")
+}
+
+fn color_disabled(args: &[OsString]) -> bool {
+    has_no_color(args)
+        || std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+        || std::env::var_os("CLICOLOR").is_some_and(|value| value == "0")
 }

@@ -96,6 +96,21 @@ npx vault --run ./tests/flows
 npx vault --run ./tests/flows/vault.yaml -t smoke
 ```
 
+### Color-free output
+
+Vault automatically uses color only for capable terminal streams and strips ANSI escapes when
+stdout or stderr is redirected. Use the global `--no-color` flag before or after a subcommand for
+deterministic plain output:
+
+```sh
+vault --no-color run --suite-dir tests/flows
+npx vault --no-color --run tests/flows
+```
+
+A non-empty `NO_COLOR` or `CLICOLOR=0` also disables color. These settings, in that order, take
+priority over `CLICOLOR_FORCE`; an empty `NO_COLOR` is treated as unset. Unicode status glyphs and
+table borders remain, while JSON and JUnit artifacts are always unstyled.
+
 To exercise the packed npm CLI from this checkout before a release exists:
 
 ```sh

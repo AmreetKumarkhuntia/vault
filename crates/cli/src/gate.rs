@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use anstream::{print, println};
 use indexmap::IndexMap;
 use owo_colors::OwoColorize;
 use vault_core::{Gate, GateDecision, PausePoint, PauseSnapshot};
@@ -34,7 +35,7 @@ impl Gate for InteractiveGate {
         );
         loop {
             print!("{} ", "step>".cyan());
-            std::io::stdout().flush().ok();
+            anstream::stdout().flush().ok();
             let mut line = String::new();
             if std::io::stdin().read_line(&mut line).is_err() {
                 return GateDecision::Continue;

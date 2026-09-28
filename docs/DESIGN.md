@@ -640,6 +640,7 @@ Any end-state assertion accepts `eventually: 5s` or the long form `{timeout, int
 ## 5. CLI spec
 
 ```
+testkit [--no-color] <command>    # global; also honors NO_COLOR and CLICOLOR=0
 testkit run [PATTERN]              # all tests, or glob over suite/test names: 'orders/*', orders/create_order
     --tag <t>            repeatable, AND semantics
     --env <name>         environment from testkit.yaml (default: local)
@@ -654,6 +655,10 @@ testkit list [PATTERN] [--tag t]   # resolved RunPlan, no execution (shares filt
 testkit validate [--live]          # parse + static checks; --live dry-runs seeds in a rolled-back txn
 testkit env [--env name]           # print MOCK_*/dependency URLs to export before starting the target
 ```
+
+Terminal styling is selected independently for stdout and stderr. Redirected streams are plain by
+default. `--no-color`, then non-empty `NO_COLOR`, then `CLICOLOR=0` disable ANSI output and take
+priority over `CLICOLOR_FORCE`; glyphs and UTF-8 table borders are preserved.
 
 **Step mode** (engine exposes a TTY-free `Gate`; the CLI implements the prompt): pauses after SEED, after ARM_MOCKS, after each step's request+captures, and before VERIFY_END_STATE.
 

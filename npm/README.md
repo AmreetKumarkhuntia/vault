@@ -17,6 +17,17 @@ npx @thunderkiller/vault --run tests/flows/vault.yaml -t smoke
 
 `--run` accepts either a suite directory or its `vault.yaml` file. Tests and flows are discovered recursively below that directory.
 
+Use the global `--no-color` flag before or after a subcommand for plain CI logs, including with the
+shorthand:
+
+```sh
+npx vault --no-color --run tests/flows
+```
+
+The binary automatically strips ANSI escapes for redirected stdout/stderr. A non-empty `NO_COLOR`
+or `CLICOLOR=0` also disables color and takes priority over `CLICOLOR_FORCE`; an empty `NO_COLOR`
+is treated as unset. Unicode status glyphs remain unchanged, and JSON/JUnit files are never styled.
+
 An empty `run` selection exits `2` before connecting to the target, stores, or mock server; `list` remains a successful zero-result inspection. If a requested JSON or JUnit report cannot be written, Vault still attempts every other requested report and exits `3`.
 
 Postgres and Redis are optional. An HTTP-only suite simply omits those stores from `vault.yaml` and does not use their seed or verify blocks.

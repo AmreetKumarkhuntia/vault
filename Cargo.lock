@@ -2724,6 +2724,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 name = "vault"
 version = "0.3.3"
 dependencies = [
+ "anstream",
  "anyhow",
  "chrono",
  "clap",
@@ -2807,6 +2808,7 @@ dependencies = [
 name = "vault-report"
 version = "0.3.3"
 dependencies = [
+ "anstream",
  "comfy-table",
  "owo-colors",
  "serde",

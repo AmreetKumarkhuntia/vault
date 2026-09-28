@@ -31,7 +31,7 @@ test("validates the local binary override", (t) => {
   );
 });
 
-test("the wrapper forwards arguments and the child exit code", (t) => {
+test("the wrapper forwards arguments, color environment, and the child exit code", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-wrapper-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const fake = path.join(dir, "fake-vault.js");
@@ -39,14 +39,14 @@ test("the wrapper forwards arguments and the child exit code", (t) => {
   fs.writeFileSync(
     fake,
     "#!/usr/bin/env node\n" +
-      'require("node:fs").writeFileSync(process.env.VAULT_ARGS_FILE, JSON.stringify(process.argv.slice(2)));\n' +
+      'require("node:fs").writeFileSync(process.env.VAULT_ARGS_FILE, JSON.stringify({ args: process.argv.slice(2), noColor: process.env.NO_COLOR }));\n' +
       "process.exit(Number(process.env.VAULT_FAKE_EXIT));\n",
     { mode: 0o755 }
   );
 
   const result = spawnSync(
     process.execPath,
-    [wrapper, "--run", "tests/http-only", "--tag", "smoke"],
+    [wrapper, "--no-color", "--run", "tests/http-only", "--tag", "smoke"],
     {
       encoding: "utf8",
       env: {
@@ -54,15 +54,14 @@ test("the wrapper forwards arguments and the child exit code", (t) => {
         VAULT_BINARY: fake,
         VAULT_ARGS_FILE: argsFile,
         VAULT_FAKE_EXIT: "7",
+        NO_COLOR: "1",
       },
     }
   );
 
   assert.equal(result.status, 7, result.stderr);
-  assert.deepEqual(JSON.parse(fs.readFileSync(argsFile, "utf8")), [
-    "--run",
-    "tests/http-only",
-    "--tag",
-    "smoke",
-  ]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(argsFile, "utf8")), {
+    args: ["--no-color", "--run", "tests/http-only", "--tag", "smoke"],
+    noColor: "1",
+  });
 });
