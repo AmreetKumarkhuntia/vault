@@ -22,7 +22,7 @@ reason, fix, pull request, and first fixed release remain traceable.
 | ---: | --- | --- | --- | --- |
 | 1 | VLT-001 | Done | XS | Empty test selections exit successfully |
 | 2 | VLT-002 | Done | XS | Requested report write failures do not fail the run |
-| 3 | VLT-013 | In progress | M | SQL-file seed fixtures are insufficiently validated |
+| 3 | VLT-013 | In progress | M | SQL fixture selection is limited to contained single files |
 | 4 | VLT-003 | Open | S | Missing environment values are resolved leniently |
 | 5 | VLT-004 | Open | S | Static validation is not environment-aware |
 | 6 | VLT-005 | Open | M | Write-capable tests have no enforced safety gate |
@@ -80,54 +80,62 @@ shown together.
 - All requested report writes are attempted and every failure is printed.
 - Successful report generation keeps the underlying test exit code.
 
-## VLT-013: SQL-file seed fixtures are insufficiently validated
+## VLT-013: SQL fixture selection is limited to contained single files
 
-**Implementation in progress.** This branch adds strict entry and contained-path validation,
-UTF-8/read validation, transaction-control rejection, path-rich runtime errors, an external driver
-matrix, and a full-stack SQL fixture scenario. The item remains in progress until the checks pass
+**Implementation in progress.** This branch adds suite-global seed, declaration-relative and
+filesystem-wide exact paths, deterministic SQL globs, an inspectable frozen fixture plan, reset-aware
+flow behavior, and external/live/demo coverage. The item remains in progress until all checks pass
 in CI and the change is merged.
 
-**Problem.** Postgres accepts `sql_file` seed entries, but malformed entries can pass static
-validation, paths are not constrained to the suite root, and no automated test proves file-backed
-execution. Database errors also omit the seed index and fixture filename.
+**Problem.** PostgreSQL seed supports one `sql_file` at a time, resolves it from the suite root,
+and rejects paths outside that root. Suites cannot declare a reusable global baseline, select an
+ordered directory of SQL files, or keep shared fixtures beside another project component.
 
-**Risk.** A fixture can silently do nothing, read an unintended local file, escape the surrounding
-seed transaction, or fail in CI with a diagnostic that does not identify its source. Ordering and
-rollback regressions can ship undetected.
+**Risk.** Authors must duplicate selector lists or copy shared data under every suite. Ad hoc file
+enumeration makes execution order, reset frequency, duplicate handling, and the exact SQL chosen by
+a run difficult to review. A changing glob could otherwise make validation and execution disagree.
 
-**Evidence.** `crates/store-postgres/src/lib.rs` joins the configured suite root to the supplied
-path and executes the contents with `raw_sql`, but validation checks only for the presence of
-`sql_file`; it does not validate its type or path. There is no SQL fixture scenario under
-`tests/flows/fixtures` and no external driver test covering success, rejection, ordering, or
-rollback.
+**Evidence.** The PostgreSQL driver recognizes `table`, `sql`, and `sql_file`, and canonicalizes
+every file against one suite root. `Config` has no global seed document, test discovery does not
+retain a declaration directory for driver resolution, and the CLI has no fixture-plan view.
 
-**Proposed resolution.** After config-time environment interpolation, define `sql_file` as a
-static, UTF-8, suite-root-relative `.sql` reference. Validate its shape, canonical path,
-containment, and contents before connecting to external services. Execute file, inline-SQL, and
-structured-row entries in declaration order under the driver-owned seed transaction, rejecting
-transaction-control statements that could escape it. Preserve logical and resolved paths in
-validation and runtime errors.
+**Proposed resolution.** Add top-level `seed` to `vault.yaml` and `sql_glob` beside literal
+`sql_file`. Resolve relative selectors from their declaring YAML; allow unlimited parent traversal,
+absolute paths, and symlink targets anywhere. Expand globs deterministically and validate/freeze the
+entire effective plan before external I/O. Re-resolve and re-read only those frozen files at
+execution, then run global and local entries together under the driver-owned transaction.
 
-**Migration impact.** Absolute and parent-relative SQL-file references currently work. Enforcing
-the suite boundary is intentionally backward-incompatible; release notes must tell users to move
-those fixtures beneath the suite root and update their references.
+**Migration impact.** Test-local relative paths change from suite-root-relative to
+declaration-relative. Nested tests may need additional `../` segments; diagnostics should point to
+the old suite-root location when it exists. Filesystem-wide access also makes suite YAML trusted
+configuration and must be called out in release and security documentation.
 
 **Acceptance criteria.**
 
-- Relative paths resolve from the directory containing `vault.yaml`, independent of process CWD.
-- Empty, non-string, missing, absolute, parent-traversing, non-SQL, non-UTF-8, runtime-template
-  (`{{ ... }}`), and suite-escaping references fail static validation with the seed index and path.
-- SQL files may contain multiple statements and compose in declaration order with inline SQL and
-  structured rows inside one seed transaction.
-- Top-level transaction-control statements cannot commit, roll back, or otherwise take ownership
-  of Vault's seed transaction.
-- Read and SQL errors identify the logical and resolved fixture paths; a failed entry rolls back
-  earlier entries.
-- External validation tests, a live Postgres driver matrix, and a full-stack demo scenario run in
-  CI.
+- Root selectors resolve from `vault.yaml`; test selectors resolve from their individual YAML.
+  Parent-relative, Unix absolute, Windows-drive, UNC, symlinked, and environment-derived paths work
+  independently of process CWD.
+- `sql_file` remains literal. `sql_glob` requires wildcard syntax, uses segment-aware `*`/`?` and
+  recursive `**`, expands in normalized logical-path order, and rejects invalid or empty matches.
+  `**` is a complete path segment and parent components precede the first wildcard.
+- Every selected path is a readable regular lowercase-`.sql` UTF-8 file. Duplicate canonical files,
+  including global/local and overlapping-glob duplicates, fail with both selector origins.
+- The complete plan is frozen before external connections. Runtime re-resolution catches deletion,
+  target changes, read errors, invalid contents, and transaction-control statements without adding
+  newly matching files.
+- After a reset, suite-global entries precede test-local entries. `flow reset: each` repeats both;
+  `reset: once` applies the global baseline before the first executable stage and later stages apply
+  only their local seed.
+- Global files, local files, inline SQL, and structured rows execute in declaration order inside one
+  PostgreSQL transaction; any failure rolls back the effective seed invocation.
+- `vault list --fixtures` reports scope, origin, selector, logical path, resolved path, and order
+  without connecting externally.
+- External validation tests, a live PostgreSQL matrix, and a runnable global/exact/glob/`../../`
+  demo scenario run in CI.
 
 **Non-goals.** This item does not add generic YAML `fixture:` entries, `$include` expansion,
-templating inside SQL files, or `psql` meta-command support.
+templating inside SQL files, `psql` meta-command support, multiple PostgreSQL stores per environment,
+or additional SQL engines.
 
 ## VLT-003: Missing environment values are resolved leniently
 

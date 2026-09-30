@@ -49,6 +49,9 @@ pub struct TestRunner {
     pub client: reqwest::Client,
     pub target_base_url: String,
     pub defaults: Defaults,
+    /// Suite-wide seed documents. At reset boundaries these are composed with
+    /// test-local seed arrays and sent to each store as one seed operation.
+    pub global_seed: IndexMap<String, Value>,
     pub stores: IndexMap<String, Arc<dyn StateStore>>,
     pub mock: Arc<MockServer>,
     pub gate: Arc<dyn Gate>,
@@ -64,10 +67,27 @@ impl TestRunner {
         flow_scope: Option<&Value>,
         flow_name: Option<&str>,
     ) -> TestResult {
+        self.run_test_tracked(def, extra_vars, do_reset, flow_scope, flow_name)
+            .await
+            .result
+    }
+
+    async fn run_test_tracked(
+        &self,
+        def: &TestDef,
+        extra_vars: &IndexMap<String, Value>,
+        do_reset: bool,
+        flow_scope: Option<&Value>,
+        flow_name: Option<&str>,
+    ) -> TrackedTestResult {
         if let Some(reason) = def.skip.reason() {
-            return TestResult::skipped(&def.test, reason);
+            return TrackedTestResult {
+                result: TestResult::skipped(&def.test, reason),
+                initialization: InitializationProgress::default(),
+            };
         }
         let started = Instant::now();
+        let mut initialization = InitializationProgress::default();
         let mut result = TestResult {
             name: def.test.clone(),
             status: TestStatus::Passed,
@@ -84,7 +104,14 @@ impl TestRunner {
 
         let outcome = tokio::time::timeout(
             def.timeout,
-            self.lifecycle(def, extra_vars, do_reset, flow_scope, &mut result),
+            self.lifecycle(
+                def,
+                extra_vars,
+                do_reset,
+                flow_scope,
+                &mut result,
+                &mut initialization,
+            ),
         )
         .await;
 
@@ -100,7 +127,10 @@ impl TestRunner {
             }
         }
         result.duration_ms = started.elapsed().as_millis() as u64;
-        result
+        TrackedTestResult {
+            result,
+            initialization,
+        }
     }
 
     async fn lifecycle(
@@ -110,23 +140,12 @@ impl TestRunner {
         do_reset: bool,
         flow_scope: Option<&Value>,
         result: &mut TestResult,
+        initialization: &mut InitializationProgress,
     ) -> Result<(), CoreError> {
         let anchor_ms = now_ms();
         let match_ctx = MatchCtx {
             anchor_unix_ms: anchor_ms,
         };
-
-        if do_reset {
-            for (kind, store) in &self.stores {
-                let spec = self
-                    .defaults
-                    .reset
-                    .get(kind)
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                store.reset(&spec).await?;
-            }
-        }
 
         let base_urls: Map<String, Value> = def
             .mocks
@@ -157,11 +176,32 @@ impl TestRunner {
             engine.set("vars", k, rendered);
         }
 
-        for (kind, doc) in &def.seed {
+        // Rendering and structural composition happen before RESET. A bad
+        // template or incompatible global/local document therefore cannot
+        // consume a reset-once flow's pending isolation boundary.
+        let seed_docs = self.render_seed_docs(def, &engine, do_reset)?;
+
+        if do_reset {
+            initialization.started = true;
+            for (kind, store) in &self.stores {
+                let spec = self
+                    .defaults
+                    .reset
+                    .get(kind)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                store.reset(&spec).await?;
+            }
+        }
+
+        for (kind, doc) in &seed_docs {
             let store = self.store(kind)?;
-            let rendered = engine.render_value(doc)?;
-            let receipt = store.seed(&rendered).await?;
+            let receipt = store.seed(doc).await?;
             result.seed_receipts.extend(receipt.entries);
+        }
+
+        if do_reset {
+            initialization.completed = true;
         }
 
         let watch_snapshot = if def.watch.is_empty() {
@@ -467,12 +507,53 @@ impl TestRunner {
         })
     }
 
+    fn render_seed_docs(
+        &self,
+        def: &TestDef,
+        engine: &TemplateEngine,
+        include_global: bool,
+    ) -> Result<IndexMap<String, Value>, CoreError> {
+        let mut docs = IndexMap::new();
+
+        if include_global {
+            for (kind, doc) in &self.global_seed {
+                docs.insert(kind.clone(), engine.render_value(doc)?);
+            }
+        }
+
+        for (kind, doc) in &def.seed {
+            let local = engine.render_value(doc)?;
+            match docs.get_mut(kind) {
+                Some(global) => {
+                    let global_entries = global.as_array_mut().ok_or_else(|| {
+                        CoreError::Harness(format!(
+                            "global and test seed documents for store `{kind}` must both be arrays"
+                        ))
+                    })?;
+                    let local_entries = local.as_array().ok_or_else(|| {
+                        CoreError::Harness(format!(
+                            "global and test seed documents for store `{kind}` must both be arrays"
+                        ))
+                    })?;
+                    global_entries.extend(local_entries.iter().cloned());
+                }
+                None => {
+                    docs.insert(kind.clone(), local);
+                }
+            }
+        }
+
+        Ok(docs)
+    }
+
     pub async fn run_flow(&self, flow: &FlowDef, tests: &HashMap<String, &TestDef>) -> FlowOutcome {
         let mut results = Vec::new();
         let mut flow_scope = Map::new();
         let mut chain_broken = false;
+        let mut reset_pending = flow.reset == FlowReset::Once;
+        let mut isolation_invalid = false;
 
-        for (i, stage) in flow.stages.iter().enumerate() {
+        for stage in &flow.stages {
             let Some(def) = tests.get(&stage.test) else {
                 results.push(TestResult::skipped(
                     &stage.test,
@@ -480,6 +561,18 @@ impl TestRunner {
                 ));
                 continue;
             };
+            if isolation_invalid {
+                let mut r = TestResult::skipped(
+                    &stage.test,
+                    format!(
+                        "reset-bound initialization failed earlier in flow `{}`",
+                        flow.flow
+                    ),
+                );
+                r.flow = Some(flow.flow.clone());
+                results.push(r);
+                continue;
+            }
             if chain_broken && flow.on_failure == FlowOnFailure::SkipRest {
                 let mut r = TestResult::skipped(
                     &stage.test,
@@ -510,11 +603,22 @@ impl TestRunner {
                 continue;
             }
 
-            let do_reset = flow.reset == FlowReset::Each || i == 0;
-            let mut result = self
-                .run_test(def, &extra, do_reset, Some(&scope), Some(&flow.flow))
+            let do_reset = flow.reset == FlowReset::Each || reset_pending;
+            let tracked = self
+                .run_test_tracked(def, &extra, do_reset, Some(&scope), Some(&flow.flow))
                 .await;
-            if result.status != TestStatus::Passed {
+            let mut result = tracked.result;
+
+            if flow.reset == FlowReset::Once && do_reset {
+                if tracked.initialization.completed {
+                    reset_pending = false;
+                } else if tracked.initialization.started {
+                    reset_pending = false;
+                    isolation_invalid = true;
+                }
+            }
+
+            if matches!(result.status, TestStatus::Failed | TestStatus::Errored) {
                 chain_broken = true;
             }
             for export in &stage.export {
@@ -531,6 +635,17 @@ impl TestRunner {
             results,
         }
     }
+}
+
+#[derive(Default)]
+struct InitializationProgress {
+    started: bool,
+    completed: bool,
+}
+
+struct TrackedTestResult {
+    result: TestResult,
+    initialization: InitializationProgress,
 }
 
 pub struct FlowOutcome {

@@ -1,15 +1,20 @@
 //! Postgres driver: seeding, TRUNCATE isolation, and expectation-driven
 //! verification with near-miss reporting.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use globset::GlobBuilder;
 use serde_json::{json, Map, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use vault_store::matchers::{self, MatchCtx};
 use vault_store::*;
+use walkdir::WalkDir;
+
+const PREPARED_SQL_FILE_KEY: &str = "__vault_prepared_sql_file";
 
 pub struct PostgresDriver;
 
@@ -20,7 +25,7 @@ impl StoreDriver for PostgresDriver {
     }
 
     fn validate(&self, doc: &StoreDoc, mode: DocMode) -> Result<(), ValidationError> {
-        self.validate_impl(doc, mode, None)
+        self.validate_impl(doc, mode)
     }
 
     fn validate_with_suite_root(
@@ -29,7 +34,25 @@ impl StoreDriver for PostgresDriver {
         mode: DocMode,
         suite_root: &Path,
     ) -> Result<(), ValidationError> {
-        self.validate_impl(doc, mode, Some(suite_root))
+        self.validate_with_context(doc, mode, &StoreDocContext::for_suite_root(suite_root))
+    }
+
+    fn validate_with_context(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        context: &StoreDocContext,
+    ) -> Result<(), ValidationError> {
+        self.prepare_impl(doc, mode, context).map(|_| ())
+    }
+
+    fn prepare_with_context(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        context: &StoreDocContext,
+    ) -> Result<PreparedStoreDoc, ValidationError> {
+        self.prepare_impl(doc, mode, context)
     }
 
     async fn connect(&self, cfg: &StoreConnConfig) -> Result<Arc<dyn StateStore>, StoreError> {
@@ -52,12 +75,7 @@ impl StoreDriver for PostgresDriver {
 }
 
 impl PostgresDriver {
-    fn validate_impl(
-        &self,
-        doc: &StoreDoc,
-        mode: DocMode,
-        suite_root: Option<&Path>,
-    ) -> Result<(), ValidationError> {
+    fn validate_impl(&self, doc: &StoreDoc, mode: DocMode) -> Result<(), ValidationError> {
         match mode {
             DocMode::Seed => {
                 let entries = doc.as_array().ok_or_else(|| {
@@ -68,21 +86,21 @@ impl PostgresDriver {
                     let m = e
                         .as_object()
                         .ok_or_else(|| ValidationError::new(&path, "must be a mapping"))?;
-                    let known = ["table", "rows", "conflict", "sql", "sql_file"];
+                    let known = ["table", "rows", "conflict", "sql", "sql_file", "sql_glob"];
                     for k in m.keys() {
                         if !known.contains(&k.as_str()) {
                             return Err(ValidationError::new(&path, format!("unknown key `{k}`")));
                         }
                     }
 
-                    let variants: Vec<&str> = ["table", "sql", "sql_file"]
+                    let variants: Vec<&str> = ["table", "sql", "sql_file", "sql_glob"]
                         .into_iter()
                         .filter(|key| m.contains_key(*key))
                         .collect();
                     if variants.len() != 1 {
                         return Err(ValidationError::new(
                             &path,
-                            "needs exactly one of `table`, `sql`, or `sql_file`",
+                            "needs exactly one of `table`, `sql`, `sql_file`, or `sql_glob`",
                         ));
                     }
 
@@ -119,46 +137,23 @@ impl PostgresDriver {
                             reject_table_options(m, &path)?;
                             let logical =
                                 non_empty_string(m.get("sql_file"), &format!("{path}.sql_file"))?;
-
-                            if let Some(root) = suite_root {
-                                let resolved =
-                                    resolve_sql_file(root, logical).map_err(|error| {
-                                        ValidationError::new(
-                                            format!("{path}.sql_file"),
-                                            format!(
-                                                "`{logical}` resolved as `{}`: {}",
-                                                error.resolved_path.display(),
-                                                error.message
-                                            ),
-                                        )
-                                    })?;
-                                let sql = read_sql_file(&resolved).map_err(|e| {
-                                    ValidationError::new(
-                                        format!("{path}.sql_file"),
-                                        format!(
-                                            "`{logical}` resolved to `{}`: could not read UTF-8 SQL file: {e}",
-                                            resolved.display()
-                                        ),
-                                    )
-                                })?;
-                                reject_transaction_control(&sql).map_err(|command| {
-                                    ValidationError::new(
-                                        format!("{path}.sql_file"),
-                                        format!(
-                                            "`{logical}` resolved to `{}`: {}",
-                                            resolved.display(),
-                                            transaction_control_message(command)
-                                        ),
-                                    )
-                                })?;
-                            } else {
-                                validate_sql_file_reference(logical).map_err(|message| {
-                                    ValidationError::new(
-                                        format!("{path}.sql_file"),
-                                        format!("`{logical}`: {message}"),
-                                    )
-                                })?;
-                            }
+                            validate_sql_file_reference(logical).map_err(|message| {
+                                ValidationError::new(
+                                    format!("{path}.sql_file"),
+                                    format!("`{logical}`: {message}"),
+                                )
+                            })?;
+                        }
+                        "sql_glob" => {
+                            reject_table_options(m, &path)?;
+                            let selector =
+                                non_empty_string(m.get("sql_glob"), &format!("{path}.sql_glob"))?;
+                            validate_sql_glob_reference(selector).map_err(|message| {
+                                ValidationError::new(
+                                    format!("{path}.sql_glob"),
+                                    format!("`{selector}`: {message}"),
+                                )
+                            })?;
                         }
                         _ => unreachable!("validated postgres seed variant"),
                     }
@@ -188,6 +183,72 @@ impl PostgresDriver {
             }
             _ => Ok(()),
         }
+    }
+
+    fn prepare_impl(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        context: &StoreDocContext,
+    ) -> Result<PreparedStoreDoc, ValidationError> {
+        self.validate_impl(doc, mode)?;
+        if mode != DocMode::Seed {
+            return Ok(PreparedStoreDoc::passthrough(doc.clone()));
+        }
+
+        let entries = doc
+            .as_array()
+            .expect("seed list was checked by validate_impl");
+        let base_dir = entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("sql_file")
+                    .or_else(|| entry.get("sql_glob"))
+                    .and_then(Value::as_str)
+            })
+            .any(selector_is_relative)
+            .then(|| absolute_declaration_dir(context))
+            .transpose()?;
+        let mut prepared_entries = Vec::new();
+        let mut files = Vec::new();
+        let mut seen: HashMap<PathBuf, ResolvedFileSource> = HashMap::new();
+
+        for (source_index, entry) in entries.iter().enumerate() {
+            let map = entry
+                .as_object()
+                .expect("seed mapping was checked by validate_impl");
+            if let Some(selector) = map.get("sql_file").and_then(Value::as_str) {
+                let yaml_path = format!("seed.postgres[{source_index}].sql_file");
+                let selection = resolve_exact_sql_file(
+                    selector,
+                    source_index,
+                    &yaml_path,
+                    context,
+                    base_dir
+                        .as_deref()
+                        .unwrap_or_else(|| context.declaring_dir()),
+                )?;
+                push_prepared_file(selection, &mut prepared_entries, &mut files, &mut seen)?;
+            } else if let Some(selector) = map.get("sql_glob").and_then(Value::as_str) {
+                let yaml_path = format!("seed.postgres[{source_index}].sql_glob");
+                for selection in expand_sql_glob(
+                    selector,
+                    source_index,
+                    &yaml_path,
+                    context,
+                    base_dir
+                        .as_deref()
+                        .unwrap_or_else(|| context.declaring_dir()),
+                )? {
+                    push_prepared_file(selection, &mut prepared_entries, &mut files, &mut seen)?;
+                }
+            } else {
+                prepared_entries.push(entry.clone());
+            }
+        }
+
+        Ok(PreparedStoreDoc::new(Value::Array(prepared_entries), files))
     }
 }
 
@@ -259,18 +320,68 @@ impl StateStore for PostgresStore {
     }
 
     async fn seed(&self, doc: &StoreDoc) -> Result<SeedReceipt, StoreError> {
-        PostgresDriver
-            .validate_with_suite_root(doc, DocMode::Seed, &self.suite_root)
-            .map_err(|e| StoreError::Harness(e.to_string()))?;
-        let entries = doc
+        let prepared = if doc.as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.get(PREPARED_SQL_FILE_KEY).is_some())
+        }) {
+            None
+        } else {
+            Some(
+                PostgresDriver
+                    .prepare_with_context(
+                        doc,
+                        DocMode::Seed,
+                        &StoreDocContext::for_suite_root(&self.suite_root),
+                    )
+                    .map_err(|error| StoreError::Harness(error.to_string()))?
+                    .into_doc(),
+            )
+        };
+        let execution_doc = prepared.as_ref().unwrap_or(doc);
+        let entries = execution_doc
             .as_array()
             .ok_or_else(|| StoreError::Harness("seed.postgres must be a list".into()))?;
         let mut receipt = SeedReceipt::default();
         let mut tx = self.pool.begin().await.map_err(db_err)?;
 
         let execution: Result<(), StoreError> = async {
+            validate_prepared_fixture_identities(entries)?;
             for (index, entry) in entries.iter().enumerate() {
-                if let Some(sql) = entry.get("sql").and_then(Value::as_str) {
+                if entry.get(PREPARED_SQL_FILE_KEY).is_some() {
+                    let source = prepared_file_source(entry, index)?;
+                    let (path, sql) = runtime_sql_file(&source)?;
+                    set_standard_conforming_strings(&mut tx)
+                        .await
+                        .map_err(|error| {
+                            StoreError::Harness(format!(
+                                "{} {} fixture `{}` resolved to `{}`: could not enforce standard string parsing: {error}",
+                                source.yaml_path,
+                                source.scope.as_str(),
+                                source.logical_path.display(),
+                                path.display()
+                            ))
+                        })?;
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|error| {
+                            StoreError::Harness(format!(
+                                "{} {} fixture `{}` selected by {} `{}` in `{}` resolved to `{}`: postgres: {error}",
+                                source.yaml_path,
+                                source.scope.as_str(),
+                                source.logical_path.display(),
+                                source.selector_kind,
+                                source.selector,
+                                source.declaring_yaml.display(),
+                                path.display()
+                            ))
+                        })?;
+                    receipt.entries.push(format!(
+                        "postgres: executed {}",
+                        source.logical_path.display()
+                    ));
+                } else if let Some(sql) = entry.get("sql").and_then(Value::as_str) {
                     reject_transaction_control(sql).map_err(|command| {
                         StoreError::Harness(format!(
                             "seed.postgres[{index}].sql: {}",
@@ -293,45 +404,6 @@ impl StateStore for PostgresStore {
                             ))
                         })?;
                     receipt.entries.push("postgres: executed inline sql".into());
-                } else if let Some(file) = entry.get("sql_file").and_then(Value::as_str) {
-                    let path = resolve_sql_file(&self.suite_root, file).map_err(|error| {
-                        StoreError::Harness(format!(
-                            "seed.postgres[{index}].sql_file `{file}` resolved as `{}`: {}",
-                            error.resolved_path.display(),
-                            error.message
-                        ))
-                    })?;
-                    let sql = read_sql_file(&path).map_err(|e| {
-                        StoreError::Harness(format!(
-                            "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: could not read UTF-8 SQL file: {e}",
-                            path.display()
-                        ))
-                    })?;
-                    reject_transaction_control(&sql).map_err(|command| {
-                        StoreError::Harness(format!(
-                            "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: {}",
-                            path.display(),
-                            transaction_control_message(command)
-                        ))
-                    })?;
-                    set_standard_conforming_strings(&mut tx)
-                        .await
-                        .map_err(|e| {
-                            StoreError::Harness(format!(
-                                "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: could not enforce standard string parsing: {e}",
-                                path.display()
-                            ))
-                        })?;
-                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| {
-                            StoreError::Harness(format!(
-                                "seed.postgres[{index}].sql_file `{file}` resolved to `{}`: postgres: {e}",
-                                path.display()
-                            ))
-                        })?;
-                    receipt.entries.push(format!("postgres: executed {file}"));
                 } else if let Some(table) = entry.get("table").and_then(Value::as_str) {
                     let rows = entry.get("rows").and_then(Value::as_array).ok_or_else(|| {
                         StoreError::Harness(format!(
@@ -348,6 +420,10 @@ impl StateStore for PostgresStore {
                     receipt
                         .entries
                         .push(format!("postgres: {table} +{} rows", rows.len()));
+                } else {
+                    return Err(StoreError::Harness(format!(
+                        "seed.postgres[{index}]: invalid prepared seed entry"
+                    )));
                 }
             }
             Ok(())
@@ -640,6 +716,12 @@ fn transaction_control_command(tokens: &[String]) -> Option<&'static str> {
         "RELEASE" => Some("RELEASE SAVEPOINT"),
         "PREPARE" if token_is(tokens, 1, "TRANSACTION") => Some("PREPARE TRANSACTION"),
         "SET" if token_is(tokens, 1, "TRANSACTION") => Some("SET TRANSACTION"),
+        "SET" if token_is(tokens, 1, "LOCAL") && token_is(tokens, 2, "TRANSACTION") => {
+            Some("SET LOCAL TRANSACTION")
+        }
+        "SET" if token_is(tokens, 1, "SESSION") && token_is(tokens, 2, "TRANSACTION") => {
+            Some("SET SESSION TRANSACTION")
+        }
         "SET"
             if token_is(tokens, 1, "SESSION")
                 && token_is(tokens, 2, "CHARACTERISTICS")
@@ -648,8 +730,37 @@ fn transaction_control_command(tokens: &[String]) -> Option<&'static str> {
         {
             Some("SET SESSION CHARACTERISTICS AS TRANSACTION")
         }
+        "SET" if transaction_setting_after_optional_scope(tokens, 1).is_some() => {
+            Some("SET transaction configuration")
+        }
+        "RESET" if token_is(tokens, 1, "ALL") || transaction_setting_token(tokens, 1) => {
+            Some("RESET transaction configuration")
+        }
         _ => None,
     }
+}
+
+fn transaction_setting_after_optional_scope(tokens: &[String], index: usize) -> Option<&str> {
+    let index = if token_is(tokens, index, "LOCAL") || token_is(tokens, index, "SESSION") {
+        index + 1
+    } else {
+        index
+    };
+    transaction_setting_token(tokens, index).then(|| tokens[index].as_str())
+}
+
+fn transaction_setting_token(tokens: &[String], index: usize) -> bool {
+    matches!(
+        tokens.get(index).map(String::as_str),
+        Some(
+            "DEFAULT_TRANSACTION_READ_ONLY"
+                | "DEFAULT_TRANSACTION_ISOLATION"
+                | "DEFAULT_TRANSACTION_DEFERRABLE"
+                | "TRANSACTION_READ_ONLY"
+                | "TRANSACTION_ISOLATION"
+                | "TRANSACTION_DEFERRABLE"
+        )
+    )
 }
 
 fn token_is(tokens: &[String], index: usize, expected: &str) -> bool {
@@ -768,39 +879,11 @@ fn is_dollar_tag_continue(byte: u8) -> bool {
     is_identifier_start(byte) || byte.is_ascii_digit()
 }
 
-#[derive(Debug)]
-struct SqlFileResolutionError {
-    resolved_path: PathBuf,
-    message: String,
-}
-
-fn sql_file_resolution_error(
-    resolved_path: impl Into<PathBuf>,
-    message: impl Into<String>,
-) -> SqlFileResolutionError {
-    SqlFileResolutionError {
-        resolved_path: resolved_path.into(),
-        message: message.into(),
-    }
-}
-
 fn validate_sql_file_reference(logical_path: &str) -> Result<(), String> {
-    let relative = Path::new(logical_path);
     if logical_path.contains("{{") || logical_path.contains("}}") {
         return Err("must be a static path without template expressions".into());
     }
-    if relative.is_absolute() {
-        return Err("must be relative to the suite root".into());
-    }
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return Err("must not contain parent, root, or platform-prefix components".into());
-    }
-    if relative
+    if Path::new(logical_path)
         .extension()
         .and_then(|extension| extension.to_str())
         != Some("sql")
@@ -810,39 +893,699 @@ fn validate_sql_file_reference(logical_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_sql_file(
-    suite_root: &Path,
-    logical_path: &str,
-) -> Result<PathBuf, SqlFileResolutionError> {
-    let relative = Path::new(logical_path);
-    let candidate = suite_root.join(relative);
+fn validate_sql_glob_reference(selector: &str) -> Result<(), String> {
+    if selector.contains("{{") || selector.contains("}}") {
+        return Err("must be a static path without template expressions".into());
+    }
+    if selector.contains('\\') {
+        return Err("must use `/` path separators".into());
+    }
+    if selector
+        .chars()
+        .any(|character| matches!(character, '[' | ']' | '{' | '}'))
+    {
+        return Err("supports only `*`, `?`, and `**` wildcard syntax".into());
+    }
+    if selector.contains("***") {
+        return Err("contains an invalid `***` wildcard; use `*` or `**`".into());
+    }
+    if selector
+        .split('/')
+        .any(|component| component.contains("**") && component != "**")
+    {
+        return Err("requires `**` to be a complete path segment for recursive matching".into());
+    }
+    let mut wildcard_seen = false;
+    for component in selector.split('/') {
+        if component == ".." && wildcard_seen {
+            return Err(
+                "requires parent (`..`) components to appear before the first wildcard".into(),
+            );
+        }
+        wildcard_seen |= component.contains('*') || component.contains('?');
+    }
+    if !selector.contains('*') && !selector.contains('?') {
+        return Err("must contain `*`, `?`, or `**`".into());
+    }
+    Ok(())
+}
 
-    validate_sql_file_reference(logical_path)
-        .map_err(|message| sql_file_resolution_error(&candidate, message))?;
-
-    let canonical_root = std::fs::canonicalize(suite_root).map_err(|e| {
-        sql_file_resolution_error(
-            suite_root,
-            format!("could not canonicalize suite root: {e}"),
+fn absolute_declaration_dir(context: &StoreDocContext) -> Result<PathBuf, ValidationError> {
+    let directory = context.declaring_dir();
+    let absolute = if directory.is_absolute() {
+        directory.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                ValidationError::new(
+                    "seed.postgres",
+                    format!("could not resolve the process directory: {error}"),
+                )
+            })?
+            .join(directory)
+    };
+    std::fs::metadata(&absolute).map_err(|error| {
+        ValidationError::new(
+            "seed.postgres",
+            format!(
+                "declaring YAML `{}` has an unresolved parent directory `{}`: {error}",
+                context.declaring_yaml.display(),
+                absolute.display()
+            ),
         )
     })?;
-    let resolved = std::fs::canonicalize(&candidate).map_err(|e| {
-        sql_file_resolution_error(&candidate, format!("could not resolve SQL file: {e}"))
+    if !absolute.is_dir() {
+        return Err(ValidationError::new(
+            "seed.postgres",
+            format!(
+                "declaring YAML `{}` has a parent path `{}` that is not a directory",
+                context.declaring_yaml.display(),
+                absolute.display()
+            ),
+        ));
+    }
+    Ok(absolute)
+}
+
+fn resolve_exact_sql_file(
+    selector: &str,
+    source_index: usize,
+    yaml_path: &str,
+    context: &StoreDocContext,
+    base_dir: &Path,
+) -> Result<ResolvedFileSource, ValidationError> {
+    validate_sql_file_reference(selector)
+        .map_err(|message| ValidationError::new(yaml_path, format!("`{selector}`: {message}")))?;
+    reject_foreign_absolute_path(selector, yaml_path)?;
+
+    let selector_path = Path::new(selector);
+    let candidate = match classify_selector_path(selector) {
+        SelectorPathKind::NativeAbsolute => selector_path.to_path_buf(),
+        SelectorPathKind::Relative => base_dir.join(selector_path),
+        SelectorPathKind::ForeignAbsolute(_) | SelectorPathKind::Invalid(_) => {
+            unreachable!("foreign and invalid paths were rejected above")
+        }
+    };
+    let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+        let migration_hint = legacy_suite_root_hint(selector, context);
+        ValidationError::new(
+            yaml_path,
+            format!(
+                "`{selector}` declared in `{}` resolved as `{}`: could not resolve SQL file: {error}{migration_hint}",
+                context.declaring_yaml.display(),
+                candidate.display()
+            ),
+        )
     })?;
-    if !resolved.starts_with(&canonical_root) {
-        return Err(sql_file_resolution_error(
-            resolved,
-            "resolves outside the suite root",
+    validate_resolved_sql_file(
+        "sql_file",
+        selector,
+        selector,
+        &candidate,
+        &resolved,
+        yaml_path,
+        &context.declaring_yaml,
+    )?;
+
+    Ok(ResolvedFileSource {
+        prepared_index: 0,
+        source_index,
+        yaml_path: yaml_path.to_string(),
+        declaring_yaml: context.declaring_yaml.clone(),
+        scope: context.scope,
+        selector_kind: "sql_file".into(),
+        selector: selector.into(),
+        logical_path: selector_path.to_path_buf(),
+        candidate_path: candidate,
+        resolved_path: resolved,
+    })
+}
+
+fn expand_sql_glob(
+    selector: &str,
+    source_index: usize,
+    yaml_path: &str,
+    context: &StoreDocContext,
+    base_dir: &Path,
+) -> Result<Vec<ResolvedFileSource>, ValidationError> {
+    validate_sql_glob_reference(selector)
+        .map_err(|message| ValidationError::new(yaml_path, format!("`{selector}`: {message}")))?;
+    reject_foreign_absolute_path(selector, yaml_path)?;
+
+    let selector_path = Path::new(selector);
+    let (logical_fixed_prefix, wildcard_suffix) =
+        split_glob_prefix(selector_path).ok_or_else(|| {
+            ValidationError::new(yaml_path, format!("`{selector}` must contain a wildcard"))
+        })?;
+    let candidate_prefix = match classify_selector_path(selector) {
+        SelectorPathKind::NativeAbsolute => logical_fixed_prefix.clone(),
+        SelectorPathKind::Relative => base_dir.join(&logical_fixed_prefix),
+        SelectorPathKind::ForeignAbsolute(_) | SelectorPathKind::Invalid(_) => {
+            unreachable!("foreign and invalid paths were rejected above")
+        }
+    };
+    let canonical_prefix = std::fs::canonicalize(&candidate_prefix).map_err(|error| {
+        ValidationError::new(
+            yaml_path,
+            format!(
+                "`{selector}` declared in `{}` has unresolved fixed prefix `{}`: {error}",
+                context.declaring_yaml.display(),
+                candidate_prefix.display()
+            ),
+        )
+    })?;
+    if !canonical_prefix.is_dir() {
+        return Err(ValidationError::new(
+            yaml_path,
+            format!(
+                "`{selector}` fixed prefix `{}` must resolve to a directory",
+                canonical_prefix.display()
+            ),
+        ));
+    }
+
+    let wildcard_suffix_utf8 = utf8_path(&wildcard_suffix, yaml_path, "glob pattern")?;
+    let matcher = GlobBuilder::new(&path_with_forward_slashes(wildcard_suffix_utf8))
+        .literal_separator(true)
+        .backslash_escape(false)
+        .build()
+        .map_err(|error| {
+            ValidationError::new(yaml_path, format!("invalid SQL glob `{selector}`: {error}"))
+        })?
+        .compile_matcher();
+
+    let logical_prefix = logical_glob_prefix(selector_path);
+    let mut matches = Vec::new();
+    let recursive = wildcard_suffix
+        .components()
+        .any(|component| component.as_os_str() == "**");
+    let mut walker = WalkDir::new(&canonical_prefix)
+        .follow_links(false)
+        .min_depth(1);
+    if !recursive {
+        walker = walker.max_depth(wildcard_suffix.components().count());
+    }
+    for walked in walker {
+        let walked = walked.map_err(|error| {
+            ValidationError::new(
+                yaml_path,
+                format!(
+                    "could not traverse SQL glob `{selector}` from `{}`: {error}",
+                    canonical_prefix.display()
+                ),
+            )
+        })?;
+        let relative_match = walked
+            .path()
+            .strip_prefix(&canonical_prefix)
+            .map_err(|error| {
+                ValidationError::new(
+                    yaml_path,
+                    format!(
+                        "could not normalize match `{}`: {error}",
+                        walked.path().display()
+                    ),
+                )
+            })?;
+        if !matcher.is_match(relative_match) {
+            continue;
+        }
+        let logical_path = logical_prefix.join(relative_match);
+        let candidate = candidate_prefix.join(relative_match);
+        matches.push((logical_path, candidate));
+    }
+
+    matches.sort_by_key(|entry| path_sort_key(&entry.0));
+    if matches.is_empty() {
+        return Err(ValidationError::new(
+            yaml_path,
+            format!(
+                "SQL glob `{selector}` declared in `{}` matched no files",
+                context.declaring_yaml.display()
+            ),
+        ));
+    }
+
+    let mut selections = Vec::with_capacity(matches.len());
+    for (logical_path, candidate) in matches {
+        utf8_path(&logical_path, yaml_path, "matched logical path")?;
+        utf8_path(&candidate, yaml_path, "matched path")?;
+        let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+            ValidationError::new(
+                yaml_path,
+                format!(
+                    "`{selector}` matched `{}` but it could not be resolved: {error}",
+                    logical_path.display()
+                ),
+            )
+        })?;
+        validate_resolved_sql_file(
+            "sql_glob",
+            selector,
+            &logical_path.display().to_string(),
+            &candidate,
+            &resolved,
+            yaml_path,
+            &context.declaring_yaml,
+        )?;
+        selections.push(ResolvedFileSource {
+            prepared_index: 0,
+            source_index,
+            yaml_path: yaml_path.to_string(),
+            declaring_yaml: context.declaring_yaml.clone(),
+            scope: context.scope,
+            selector_kind: "sql_glob".into(),
+            selector: selector.into(),
+            logical_path,
+            candidate_path: candidate,
+            resolved_path: resolved,
+        });
+    }
+    Ok(selections)
+}
+
+fn split_glob_prefix(pattern: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut fixed = PathBuf::new();
+    let mut suffix = PathBuf::new();
+    let mut wildcard_seen = false;
+    for component in pattern.components() {
+        let has_wildcard = matches!(component, Component::Normal(value) if {
+            let text = value.to_string_lossy();
+            text.contains('*') || text.contains('?')
+        });
+        if wildcard_seen || has_wildcard {
+            wildcard_seen = true;
+            suffix.push(component.as_os_str());
+        } else {
+            fixed.push(component.as_os_str());
+        }
+    }
+    wildcard_seen.then_some((fixed, suffix))
+}
+
+fn logical_glob_prefix(selector: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for component in selector.components() {
+        let has_wildcard = matches!(component, Component::Normal(value) if {
+            let text = value.to_string_lossy();
+            text.contains('*') || text.contains('?')
+        });
+        if has_wildcard {
+            break;
+        }
+        prefix.push(component.as_os_str());
+    }
+    prefix
+}
+
+fn validate_resolved_sql_file(
+    selector_kind: &str,
+    selector: &str,
+    logical: &str,
+    candidate: &Path,
+    resolved: &Path,
+    yaml_path: &str,
+    declaring_yaml: &Path,
+) -> Result<(), ValidationError> {
+    let declaring_yaml_text = utf8_path(declaring_yaml, yaml_path, "declaring YAML path")?;
+    let candidate_text = utf8_path(candidate, yaml_path, "matched path")?;
+    let resolved_text = utf8_path(resolved, yaml_path, "resolved path")?;
+    for (description, value) in [
+        ("matched logical path", logical),
+        ("declaring YAML path", declaring_yaml_text),
+        ("matched path", candidate_text),
+        ("resolved path", resolved_text),
+    ] {
+        if value.contains("{{") || value.contains("}}") {
+            return Err(ValidationError::new(
+                yaml_path,
+                format!(
+                    "{selector_kind} `{selector}` declared in `{}` selected `{logical}`, but its {description} `{value}` contains a runtime template marker",
+                    declaring_yaml.display()
+                ),
+            ));
+        }
+    }
+    if candidate
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("sql")
+    {
+        return Err(ValidationError::new(
+            yaml_path,
+            format!(
+                "{selector_kind} `{selector}` declared in `{}` selected `{logical}` resolved as `{}` which must have a lowercase `.sql` extension",
+                declaring_yaml.display(),
+                candidate.display()
+            ),
         ));
     }
     if !resolved.is_file() {
-        return Err(sql_file_resolution_error(
-            resolved,
-            "must resolve to a regular file",
+        return Err(ValidationError::new(
+            yaml_path,
+            format!(
+                "{selector_kind} `{selector}` declared in `{}` selected `{logical}` resolved to `{}` which must be a regular file",
+                declaring_yaml.display(),
+                resolved.display()
+            ),
         ));
     }
+    let sql = read_sql_file(resolved).map_err(|error| {
+        ValidationError::new(
+            yaml_path,
+            format!(
+                "{selector_kind} `{selector}` declared in `{}` selected `{logical}` resolved to `{}`: could not read UTF-8 SQL file: {error}",
+                declaring_yaml.display(),
+                resolved.display()
+            ),
+        )
+    })?;
+    reject_transaction_control(&sql).map_err(|command| {
+        ValidationError::new(
+            yaml_path,
+            format!(
+                "{selector_kind} `{selector}` declared in `{}` selected `{logical}` resolved to `{}`: {}",
+                declaring_yaml.display(),
+                resolved.display(),
+                transaction_control_message(command)
+            ),
+        )
+    })
+}
 
-    Ok(resolved)
+fn push_prepared_file(
+    mut source: ResolvedFileSource,
+    entries: &mut Vec<Value>,
+    files: &mut Vec<ResolvedFileSource>,
+    seen: &mut HashMap<PathBuf, ResolvedFileSource>,
+) -> Result<(), ValidationError> {
+    if let Some(previous) = seen.get(&source.resolved_path) {
+        return Err(ValidationError::new(
+            &source.yaml_path,
+            format!(
+                "SQL fixture `{}` from {} `{}` declared in `{}` resolves to `{}`, already selected by {} `{}` at {} declared in `{}`",
+                source.logical_path.display(),
+                source.selector_kind,
+                source.selector,
+                source.declaring_yaml.display(),
+                source.resolved_path.display(),
+                previous.selector_kind,
+                previous.selector,
+                previous.yaml_path,
+                previous.declaring_yaml.display()
+            ),
+        ));
+    }
+    source.prepared_index = entries.len();
+    entries.push(prepared_file_entry(&source));
+    seen.insert(source.resolved_path.clone(), source.clone());
+    files.push(source);
+    Ok(())
+}
+
+fn prepared_file_entry(source: &ResolvedFileSource) -> Value {
+    json!({
+        PREPARED_SQL_FILE_KEY: {
+            "source_index": source.source_index,
+            "yaml_path": source.yaml_path,
+            "declaring_yaml": source.declaring_yaml.to_string_lossy(),
+            "scope": source.scope.as_str(),
+            "selector_kind": source.selector_kind,
+            "selector": source.selector,
+            "logical_path": source.logical_path.to_string_lossy(),
+            "candidate_path": source.candidate_path.to_string_lossy(),
+            "resolved_path": source.resolved_path.to_string_lossy(),
+        }
+    })
+}
+
+fn prepared_file_source(
+    entry: &Value,
+    prepared_index: usize,
+) -> Result<ResolvedFileSource, StoreError> {
+    let metadata = entry
+        .get(PREPARED_SQL_FILE_KEY)
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            StoreError::Harness(format!(
+                "seed.postgres[{prepared_index}]: invalid prepared SQL fixture metadata"
+            ))
+        })?;
+    let string = |key: &str| -> Result<String, StoreError> {
+        metadata
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                StoreError::Harness(format!(
+                    "seed.postgres[{prepared_index}].{PREPARED_SQL_FILE_KEY}.{key}: missing string"
+                ))
+            })
+    };
+    let scope = match string("scope")?.as_str() {
+        "global" => StoreDocScope::Global,
+        "local" => StoreDocScope::Local,
+        value => {
+            return Err(StoreError::Harness(format!(
+            "seed.postgres[{prepared_index}].{PREPARED_SQL_FILE_KEY}.scope: invalid scope `{value}`"
+        )))
+        }
+    };
+    Ok(ResolvedFileSource {
+        prepared_index,
+        source_index: metadata
+            .get("source_index")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| StoreError::Harness(format!(
+                "seed.postgres[{prepared_index}].{PREPARED_SQL_FILE_KEY}.source_index: missing integer"
+            )))?,
+        yaml_path: string("yaml_path")?,
+        declaring_yaml: PathBuf::from(string("declaring_yaml")?),
+        scope,
+        selector_kind: string("selector_kind")?,
+        selector: string("selector")?,
+        logical_path: PathBuf::from(string("logical_path")?),
+        candidate_path: PathBuf::from(string("candidate_path")?),
+        resolved_path: PathBuf::from(string("resolved_path")?),
+    })
+}
+
+fn validate_prepared_fixture_identities(entries: &[Value]) -> Result<(), StoreError> {
+    let has_prepared_files = entries
+        .iter()
+        .any(|entry| entry.get(PREPARED_SQL_FILE_KEY).is_some());
+    if !has_prepared_files {
+        return Ok(());
+    }
+
+    let mut seen: HashMap<PathBuf, ResolvedFileSource> = HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.get("sql_file").is_some() || entry.get("sql_glob").is_some() {
+            return Err(StoreError::Harness(format!(
+                "seed.postgres[{index}]: prepared fixture plan contains an unresolved sql_file or sql_glob entry"
+            )));
+        }
+        if entry.get(PREPARED_SQL_FILE_KEY).is_none() {
+            continue;
+        }
+
+        let source = prepared_file_source(entry, index)?;
+        if let Some(previous) = seen.get(&source.resolved_path) {
+            return Err(StoreError::Harness(format!(
+                "{} {} fixture `{}` selected by {} `{}` in `{}` resolves to `{}`, already selected by {} `{}` at {} {} fixture `{}` in `{}`",
+                source.yaml_path,
+                source.scope.as_str(),
+                source.logical_path.display(),
+                source.selector_kind,
+                source.selector,
+                source.declaring_yaml.display(),
+                source.resolved_path.display(),
+                previous.selector_kind,
+                previous.selector,
+                previous.yaml_path,
+                previous.scope.as_str(),
+                previous.logical_path.display(),
+                previous.declaring_yaml.display()
+            )));
+        }
+        seen.insert(source.resolved_path.clone(), source);
+    }
+    Ok(())
+}
+
+fn runtime_sql_file(source: &ResolvedFileSource) -> Result<(PathBuf, String), StoreError> {
+    let resolved = std::fs::canonicalize(&source.candidate_path).map_err(|error| {
+        StoreError::Harness(format!(
+            "{} {} fixture `{}` selected by {} `{}` in `{}` resolved as `{}` (prepared as `{}`): could not re-resolve SQL file: {error}",
+            source.yaml_path,
+            source.scope.as_str(),
+            source.logical_path.display(),
+            source.selector_kind,
+            source.selector,
+            source.declaring_yaml.display(),
+            source.candidate_path.display(),
+            source.resolved_path.display()
+        ))
+    })?;
+    if resolved != source.resolved_path {
+        return Err(StoreError::Harness(format!(
+            "{} {} fixture `{}` selected by {} `{}` in `{}` changed canonical target from `{}` to `{}` after preparation",
+            source.yaml_path,
+            source.scope.as_str(),
+            source.logical_path.display(),
+            source.selector_kind,
+            source.selector,
+            source.declaring_yaml.display(),
+            source.resolved_path.display(),
+            resolved.display()
+        )));
+    }
+    if !resolved.is_file() {
+        return Err(StoreError::Harness(format!(
+            "{} {} fixture `{}` selected by {} `{}` in `{}` resolved to `{}` which is no longer a regular file",
+            source.yaml_path,
+            source.scope.as_str(),
+            source.logical_path.display(),
+            source.selector_kind,
+            source.selector,
+            source.declaring_yaml.display(),
+            resolved.display()
+        )));
+    }
+    let sql = read_sql_file(&resolved).map_err(|error| {
+        StoreError::Harness(format!(
+            "{} {} fixture `{}` selected by {} `{}` in `{}` resolved to `{}`: could not read UTF-8 SQL file: {error}",
+            source.yaml_path,
+            source.scope.as_str(),
+            source.logical_path.display(),
+            source.selector_kind,
+            source.selector,
+            source.declaring_yaml.display(),
+            resolved.display()
+        ))
+    })?;
+    reject_transaction_control(&sql).map_err(|command| {
+        StoreError::Harness(format!(
+            "{} {} fixture `{}` selected by {} `{}` in `{}` resolved to `{}`: {}",
+            source.yaml_path,
+            source.scope.as_str(),
+            source.logical_path.display(),
+            source.selector_kind,
+            source.selector,
+            source.declaring_yaml.display(),
+            resolved.display(),
+            transaction_control_message(command)
+        ))
+    })?;
+    Ok((resolved, sql))
+}
+
+fn legacy_suite_root_hint(selector: &str, context: &StoreDocContext) -> String {
+    let selector_path = Path::new(selector);
+    if !selector_is_relative(selector) || context.scope == StoreDocScope::Global {
+        return String::new();
+    }
+    let legacy = context.suite_root.join(selector_path);
+    if legacy.is_file() {
+        format!(
+            "; relative sql_file paths now resolve from the declaring YAML; the former suite-root location exists at `{}`",
+            legacy.display()
+        )
+    } else {
+        String::new()
+    }
+}
+
+fn reject_foreign_absolute_path(selector: &str, yaml_path: &str) -> Result<(), ValidationError> {
+    match classify_selector_path(selector) {
+        SelectorPathKind::ForeignAbsolute(kind) => Err(ValidationError::new(
+            yaml_path,
+            format!(
+                "{kind} absolute path `{selector}` cannot be resolved on this operating system"
+            ),
+        )),
+        SelectorPathKind::Invalid(reason) => Err(ValidationError::new(
+            yaml_path,
+            format!("invalid fixture path `{selector}`: {reason}"),
+        )),
+        SelectorPathKind::NativeAbsolute | SelectorPathKind::Relative => Ok(()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SelectorPathKind {
+    NativeAbsolute,
+    Relative,
+    ForeignAbsolute(&'static str),
+    Invalid(&'static str),
+}
+
+fn selector_is_relative(path: &str) -> bool {
+    matches!(classify_selector_path(path), SelectorPathKind::Relative)
+}
+
+fn classify_selector_path(path: &str) -> SelectorPathKind {
+    let bytes = path.as_bytes();
+    let drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let drive_absolute = drive_prefix
+        && bytes
+            .get(2)
+            .is_some_and(|separator| matches!(separator, b'/' | b'\\'));
+    let unc = path.starts_with("//") || path.starts_with("\\\\");
+    let unix_absolute = path.starts_with('/') && !unc;
+
+    #[cfg(not(windows))]
+    {
+        if drive_absolute || unc {
+            SelectorPathKind::ForeignAbsolute("Windows")
+        } else if drive_prefix {
+            SelectorPathKind::Invalid("Windows drive paths must be absolute")
+        } else if unix_absolute {
+            SelectorPathKind::NativeAbsolute
+        } else {
+            SelectorPathKind::Relative
+        }
+    }
+    #[cfg(windows)]
+    {
+        if drive_absolute || unc {
+            SelectorPathKind::NativeAbsolute
+        } else if drive_prefix {
+            SelectorPathKind::Invalid("Windows drive paths must be absolute")
+        } else if unix_absolute {
+            SelectorPathKind::ForeignAbsolute("Unix")
+        } else if path.starts_with('\\') {
+            SelectorPathKind::Invalid("rooted Windows paths require a drive or UNC share")
+        } else {
+            SelectorPathKind::Relative
+        }
+    }
+}
+
+fn utf8_path<'a>(
+    path: &'a Path,
+    yaml_path: &str,
+    description: &str,
+) -> Result<&'a str, ValidationError> {
+    path.to_str().ok_or_else(|| {
+        ValidationError::new(
+            yaml_path,
+            format!("{description} `{}` is not valid UTF-8", path.display()),
+        )
+    })
+}
+
+fn path_with_forward_slashes(path: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        path.to_string()
+    } else {
+        path.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
+
+fn path_sort_key(path: &Path) -> String {
+    path_with_forward_slashes(&path.to_string_lossy())
 }
 
 impl PostgresStore {

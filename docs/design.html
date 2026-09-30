@@ -251,7 +251,7 @@ footer{
 </div>
 <ul>
   <li><strong>Validate everything before running anything.</strong> All YAML is parsed and cross-checked up front (unknown fields, dangling template references, undefined mock names). A bad suite aborts the whole run with exit&nbsp;2 before a single test executes.</li>
-  <li><strong>Reset before, not clean after.</strong> Isolation runs at the <em>start</em> of each test (<code>TRUNCATE … RESTART IDENTITY CASCADE</code>, <code>FLUSHDB</code>, clear mock state). A crashed run can never poison the next one, and failed-test state stays in place for post-mortem inspection.</li>
+  <li><strong>Reset before, not clean after.</strong> Isolation runs at the <em>start</em> of each test (<code>TRUNCATE … RESTART IDENTITY CASCADE</code>, <code>FLUSHDB</code>, clear mock state), followed by suite-global seed and then test-local seed. A crashed run can never poison the next one, and failed-test state stays in place for post-mortem inspection.</li>
   <li><strong>Fail-fast between steps, collect-all within.</strong> A failed step stops the step sequence (later captures would be garbage), but all assertions inside a step are evaluated and reported together.</li>
   <li><strong>End-state verification always runs</strong> — even when a step failed. “The response was wrong <em>and</em> here's what actually hit the DB and mocks” is the debugging gold.</li>
   <li><strong>Run-level preflight</strong> probes the target's health endpoint, Postgres, Redis, and the mock listener before test #1; any failure exits 3 immediately with a reachability table instead of letting forty tests time out.</li>
@@ -263,11 +263,18 @@ footer{
 
 <h3>File layout &amp; global config</h3>
 <pre><code>tests/
-  testkit.yaml              <span class="c"># global config: environments, DSNs, mock bind, defaults</span>
-  fixtures/                 <span class="c"># static PostgreSQL .sql seed files</span>
-  orders/
-    create_order.test.yaml  <span class="c"># one test per file</span></code></pre>
-<p><code>testkit.yaml</code> holds environments (<code>local</code>, <code>ci</code>, …) with the target base URL + health check, Postgres/Redis URLs, and the mock bind address. Connection strings live <em>only</em> here — a test file can never silently point at production. Layering: CLI flags &gt; <code>TESTKIT_*</code> env vars &gt; <code>testkit.yaml</code>.</p>
+  shared-fixtures/          <span class="c"># optional fixtures outside the suite</span>
+  flows/
+    vault.yaml              <span class="c"># environments, defaults, and suite-global seed</span>
+    fixtures/               <span class="c"># PostgreSQL .sql files; never discovered as tests</span>
+    orders/
+      create_order.test.yaml <span class="c"># one test per file</span></code></pre>
+<p><code>vault.yaml</code> holds environments (<code>local</code>, <code>ci</code>, …) with the target base URL + health check, Postgres/Redis URLs, and the mock bind address. Connection strings live <em>only</em> here — a test file can never silently point at production. A top-level <code>seed:</code> block declares the suite-global baseline that runs after every reset, before the executing test's local seed.</p>
+<pre><code><span class="c"># tests/flows/vault.yaml</span>
+<span class="k">seed:</span>
+  <span class="k">postgres:</span>
+    - sql_file: fixtures/global/00_schema.sql
+    - sql_glob: "fixtures/global/*.seed.sql"</code></pre>
 
 <h3>Anatomy of a test</h3>
 <p>A complete, realistic example — create an order, which charges a card through a mocked payment service, inserts a row, and warms a cache:</p>
@@ -346,11 +353,24 @@ footer{
   <span class="k">ordered:</span> [[exactly one charge, confirmation email]]
   <span class="k">unexpected:</span> fail               <span class="c"># unplanned traffic to mocked deps fails the test</span></code></pre>
 
+<h3>PostgreSQL SQL fixtures</h3>
+<pre><code><span class="c"># tests/flows/orders/create_order.test.yaml</span>
+<span class="k">seed:</span>
+  <span class="k">postgres:</span>
+    - sql_file: ../fixtures/order_base.sql
+    - sql_glob: "../fixtures/order_states/*.sql"
+    - sql_file: ../../shared-fixtures/customer.sql
+    - sql_glob: "${env.SQL_FIXTURE_ROOT}/orders/**/*.sql"</code></pre>
+<p><code>sql_file</code> selects one literal file. <code>sql_glob</code> requires <code>*</code>, <code>?</code>, or recursive <code>**</code>, fails when it matches nothing, and expands in normalized logical-path order at its list position. <code>**</code> must be a complete path segment, and parent (<code>..</code>) components must precede the first wildcard. Selecting the same canonical file twice is an error. Vault never discovers SQL implicitly; a bare directory is invalid.</p>
+<p>Relative paths resolve from the YAML that declares them: root seed from <code>vault.yaml</code>, local seed from its <code>*.test.yaml</code>. Parent traversal and native absolute Unix, Windows-drive, and UNC paths are allowed with no fixture-root allowlist, independent of process CWD; foreign-platform absolute forms are diagnosed instead of reinterpreted. <code>~</code> and shell expansion are not supported; use config-time <code>${env.NAME}</code> for machine-specific roots.</p>
+<p>Vault validates and freezes the complete ordered plan before connecting externally, then re-resolves and re-reads only those files at execution. Global and local files, inline SQL, and structured rows share one PostgreSQL transaction and roll back together. SQL must be UTF-8, is not templated, and cannot contain top-level transaction control. <code>vault list --fixtures</code> prints the plan without a database connection and marks later reset-bound branches as conditional when pre-lifecycle failures can defer reset-once initialization.</p>
+<p><strong>Security:</strong> fixture YAML is trusted configuration because selectors may read and execute any accessible <code>.sql</code> file. Do not run untrusted suites with sensitive filesystem access or database credentials. Keep global DDL idempotent because truncate-based reset modes reapply it.</p>
+
 <h3>Templating &amp; reuse</h3>
 <ul>
   <li><strong>minijinja</strong>, expressions only (<code>{{ }}</code>; logic blocks rejected in v1 — tests stay declarative). Namespaces: <code>vars.*</code>, <code>steps.&lt;name&gt;.captures.*</code> (plus flat shorthand), <code>mock.&lt;dep&gt;.base_url</code>, allow-listed <code>env.*</code>; builtins <code>uuid()</code>, <code>now()</code> (frozen per test so <code>!near-now</code> has a stable anchor), <code>random_int()</code>.</li>
   <li><strong>Typing rule:</strong> a scalar that is exactly one expression substitutes the native JSON value — captured numbers stay numbers, which is what makes DB matchers work.</li>
-  <li><strong>Reuse:</strong> YAML anchors work within a file. PostgreSQL <code>sql_file</code> resolves static UTF-8 SQL safely from the suite root and executes inside Vault's seed transaction. Generic YAML <code>fixture:</code>, <code>$include</code>, and <code>_suite.yaml</code> inheritance are planned, not implemented. No test inheritance in v1.</li>
+  <li><strong>Reuse:</strong> YAML anchors work within a file. PostgreSQL <code>sql_file</code> and <code>sql_glob</code> are the file-backed seed mechanisms. Generic YAML <code>fixture:</code>, <code>$include</code>, and <code>_suite.yaml</code> inheritance are planned, not implemented. No test inheritance in v1.</li>
 </ul>
 
 <h3>Chaining tests: flows (use one test's data in the next)</h3>
@@ -369,6 +389,7 @@ footer{
 <ul>
   <li><strong>Tests stay independently runnable</strong> — they declare inputs as <code>vars:</code> with defaults (or <code>required: true</code>); <code>with:</code> overrides them, and nothing inside a test file knows about flows.</li>
   <li><strong>Exports are explicit and validated</strong> — a <code>{{ flow.* }}</code> reference no earlier stage exports is a static validation error, before anything runs. Values stay JSON-typed.</li>
+  <li><strong>Reset governs global seed</strong> — <code>reset: each</code> reapplies it before every executing stage; <code>reset: once</code> applies it before the first stage that enters its lifecycle, and later stages add only local seed.</li>
   <li><strong>Per-stage mocks and verify</strong> — each stage arms its own mock session and recording buffer, so <code>verify.calls</code> never sees a previous stage's traffic.</li>
   <li><strong>CLI:</strong> <code>testkit run 'order lifecycle'</code> runs the chain; naming a mid-flow stage runs everything up to and including it. Flows shuffle as one atomic unit, and <code>--step</code> pauses across stage boundaries too.</li>
   <li><strong>Deferred:</strong> a free-form <code>needs:</code> dependency DAG — linear flows are deterministic and reportable, and a DAG can layer on later without breaking the DSL.</li>
@@ -452,7 +473,7 @@ pub trait StateStore: Send + Sync {
 <pre><code>testkit [--no-color] &lt;command&gt;     <span class="c"># also honors NO_COLOR and CLICOLOR=0</span>
 testkit run [PATTERN] [--tag t]… [--env name] [--step] [--break-at test:step]
             [--shuffle [--seed N]] [--report out.json] [--junit out.xml] [-v|-vv]
-testkit list [PATTERN] [--tag t]     <span class="c"># resolved run plan, no execution</span>
+testkit list [PATTERN] [--tag t] [--fixtures] <span class="c"># run plan + optional exact SQL files, no execution</span>
 testkit validate [--live]            <span class="c"># static checks; --live dry-runs seeds, rolled back</span>
 testkit env [--env name]             <span class="c"># print mock/dependency URLs to export before starting target</span></code></pre>
 <p>Exit codes: <code>0</code> pass · <code>1</code> a test failed · <code>2</code> config/usage error (including an empty <code>run</code> selection) · <code>3</code> environment/preflight/report/harness error · <code>130</code> interrupted. An empty run names its pattern and tags before any runtime or preflight work; the same <code>list</code> filter reports zero matches and exits <code>0</code>. All requested JSON and JUnit writes are attempted, and any write failure exits <code>3</code> without removing a successful sibling report.</p>

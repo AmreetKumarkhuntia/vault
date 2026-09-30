@@ -4,7 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 use vault_store::{
-    DocMode, StateStore, StoreConnConfig, StoreDoc, StoreDriver, StoreError, ValidationError,
+    DocMode, StateStore, StoreConnConfig, StoreDoc, StoreDocContext, StoreDocScope, StoreDriver,
+    StoreError, ValidationError,
 };
 
 struct LegacyDriver;
@@ -36,4 +37,14 @@ fn existing_drivers_and_connection_config_literals_remain_source_compatible() {
     LegacyDriver
         .validate_with_suite_root(&json!([]), DocMode::Seed, Path::new("."))
         .expect("the suite-root hook should delegate to legacy validate implementations");
+
+    let prepared = LegacyDriver
+        .prepare_with_context(
+            &json!([]),
+            DocMode::Seed,
+            &StoreDocContext::new(".", "./nested/test.yaml", StoreDocScope::Local),
+        )
+        .expect("the preparation hook should validate and clone for legacy drivers");
+    assert_eq!(prepared.doc(), &json!([]));
+    assert!(prepared.files().is_empty());
 }
