@@ -1,3 +1,8 @@
+## v0.5.0 (2026-09-30)
+
+### Features
+- add YAML-controlled fixture plans (2fb5170)
+
 ## Unreleased
 
 ### Features
