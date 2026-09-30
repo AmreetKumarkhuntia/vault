@@ -16,6 +16,10 @@ pub struct Config {
     pub environments: IndexMap<String, Environment>,
     #[serde(default)]
     pub defaults: Defaults,
+    /// Suite-wide seed documents keyed by store kind. These are applied at
+    /// every reset boundary before the current test's local seed document.
+    #[serde(default)]
+    pub seed: IndexMap<String, Json>,
     #[serde(default)]
     pub report: ReportCfg,
 }

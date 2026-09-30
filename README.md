@@ -82,6 +82,7 @@ vault env                  # print the env the target should start with
 # start your target with those URLs …
 vault validate             # static-check every YAML file, no execution
 vault list                 # resolved run plan
+vault list --fixtures      # ordered SQL fixture plans, no database connection
 vault run                  # everything: flows + standalone tests
 vault run 'create order*'  # one test by name/glob
 vault run -t smoke         # filter by tag
@@ -200,22 +201,77 @@ verify:                           # end-state, evaluated after all steps
 
 ### PostgreSQL SQL fixtures
 
-Use `sql_file` for multi-statement PostgreSQL setup that is clearer as plain SQL:
+SQL fixture selection is entirely YAML-controlled. Put suite-global fixtures in the root
+`vault.yaml`; Vault reapplies them after every database reset boundary:
 
 ```yaml
+# tests/flows/vault.yaml
 seed:
   postgres:
-    - sql_file: fixtures/sql_file_order.sql
+    - sql_file: fixtures/global/00_schema.sql
+    - sql_glob: "fixtures/global/*.seed.sql"
+```
+
+Put scenario-specific fixtures in a test file. Paths are relative to the YAML file that declares
+them, so a nested test can refer to files inside or outside the suite:
+
+```yaml
+# tests/flows/orders/create_order.test.yaml
+seed:
+  postgres:
+    - sql_file: ../fixtures/order_base.sql
+    - sql_glob: "../fixtures/order_states/*.sql"
+    - sql_file: ../../shared-fixtures/customer.sql
+    - sql_glob: "${env.SQL_FIXTURE_ROOT}/orders/**/*.sql"
     - sql: "UPDATE orders SET status = 'fixture-ready' WHERE id = 7101;"
 ```
 
-Paths are static and resolve from the suite root—the directory containing `vault.yaml`—not from
-the process working directory or the individual test file. They must be relative `.sql` files
-that remain inside the suite root. Vault validates the reference before connecting to stores,
-then executes SQL-file, inline-SQL, and structured-row entries in declaration order in one
-transaction. Files must be UTF-8 PostgreSQL SQL; `psql` meta-commands and templates inside the
-file are not evaluated. Top-level transaction-control statements are rejected so a fixture cannot
-commit or roll back Vault's seed transaction. See the runnable example in
+`sql_file` selects exactly one literal file; wildcard characters in its value are not expanded.
+`sql_glob` selects one or more files, must contain `*`, `?`, or `**`, and fails validation when it
+matches nothing. `*` and `?` stay within one path segment, while `**` crosses directories. Matches
+are sorted by their normalized logical paths and expanded at the selector's position, so names such
+as `10_users.sql` and `20_orders.sql` make ordering explicit. Selecting the same canonical file
+twice—directly, through overlapping globs, or through a symlink—is an error. Vault never discovers
+SQL implicitly; a bare directory is not a selector. `**` must be a complete path segment, and any
+parent (`..`) components in a glob must appear before its first wildcard.
+
+Root selectors resolve from the directory containing `vault.yaml`; test selectors resolve from the
+directory containing that `*.test.yaml`. `../` and `../../` have no suite-boundary restriction, and
+Unix absolute paths, Windows drive paths, and UNC paths are accepted. Paths do not depend on the
+process working directory. `~` and shell expressions are not expanded; use `${env.NAME}` when an
+absolute location differs by machine. Globs use `/` separators on every platform, and Vault applies
+no fixture-root allowlist. Absolute forms must be native to the current operating system; a foreign
+Windows or Unix form is diagnosed rather than reinterpreted as a local path. This
+declaration-relative rule changes earlier `sql_file` behavior: a
+nested test that previously used
+`fixtures/base.sql` for a suite-root file should use `../fixtures/base.sql` (or the appropriate
+number of parent segments).
+
+Vault expands and validates the complete selection before opening database, target, or mock-server
+connections, then freezes that ordered file list. Immediately before execution it resolves and
+reads each frozen file again; a removed file, changed symlink target, unreadable file, invalid
+UTF-8, directory, or non-lowercase-`.sql` match fails the seed. Directory symlinks discovered while
+walking a glob are not followed, while exact paths and a glob's fixed prefix may traverse symlinks.
+
+For each reset boundary, suite-global entries run first, followed by the current test's entries.
+File SQL, inline SQL, and structured rows execute in declaration order in one PostgreSQL
+transaction, and any read, validation, or execution error rolls back the entire effective seed.
+With `flow reset: each`, global fixtures run for every executing stage; with `reset: once`, they run
+once before the first stage that enters its lifecycle and later stages add only their local seeds.
+Skipped tests and empty selections run no fixtures. For `reset: once` plus `on_failure: continue`,
+`vault list --fixtures` marks later global plans as conditional because a pre-lifecycle failure can
+leave initialization pending for the next stage.
+
+Files must contain UTF-8 PostgreSQL SQL. Their contents are not templated, and `psql` meta-commands
+are not interpreted. Top-level transaction-control statements are rejected so fixtures cannot
+commit, roll back, or otherwise take ownership of Vault's transaction. Use `vault list --fixtures`
+to inspect each scope, selector, logical path, resolved absolute path, execution order, and any
+conditional reset-bound branch without connecting to PostgreSQL.
+
+Fixture YAML is trusted configuration: an exact path or glob may read and execute any accessible
+`.sql` file. Do not run untrusted suites or pull requests with sensitive filesystem access or
+database credentials. Global DDL should be idempotent because truncate-based reset modes preserve
+tables and reapply global fixtures. See the runnable exact/glob/parent-relative example in
 `tests/flows/orders/sql_file_seed.test.yaml`.
 
 ### Flows: use one test's data in the next

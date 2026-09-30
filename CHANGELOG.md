@@ -1,3 +1,17 @@
+## Unreleased
+
+### Features
+- add suite-global PostgreSQL seed and deterministic `sql_glob` fixture selection
+- allow declaration-relative, parent-relative, absolute, and symlinked SQL fixture paths
+
+### Breaking changes
+- resolve test-local `sql_file` paths from the declaring test YAML instead of the suite root; nested
+  tests may need additional `../` segments
+
+### Security
+- treat suite YAML as trusted configuration because SQL selectors may read and execute any
+  accessible `.sql` file
+
 ## v0.4.0 (2026-09-28)
 
 ### Features
@@ -46,4 +60,3 @@
 - tests/code for harness tests, tests/flows for YAML suites (91b90df)
 - README (92edc20)
 - design document for the vault black-box API test harness (a749e8d)
-

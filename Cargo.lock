@@ -2752,6 +2752,7 @@ dependencies = [
 name = "vault-core"
 version = "0.4.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "humantime",
  "indexmap",
@@ -2835,12 +2836,14 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "globset",
  "regex",
  "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
  "vault-store",
+ "walkdir",
 ]
 
 [[package]]

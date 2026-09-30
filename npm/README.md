@@ -17,6 +17,13 @@ npx @thunderkiller/vault --run tests/flows/vault.yaml -t smoke
 
 `--run` accepts either a suite directory or its `vault.yaml` file. Tests and flows are discovered recursively below that directory.
 
+PostgreSQL `sql_file` and `sql_glob` selectors are passed through unchanged. Vault resolves relative
+selectors from the YAML file that declares them, so `../`/`../../`, absolute paths, and fixtures
+outside the suite work the same through `npx` as they do through the native binary. `sql_file` is
+literal; `sql_glob` uses `/` separators with segment-local `*`/`?` and a whole-segment recursive
+`**`. Because suite YAML can select and execute any accessible `.sql` file, run only trusted suites
+when filesystem access or database credentials are available.
+
 Use the global `--no-color` flag before or after a subcommand for plain CI logs, including with the
 shorthand:
 

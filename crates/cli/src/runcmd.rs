@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use vault_core::{NoopGate, RunResult, TestRunner};
 use vault_dsl::Suite;
 use vault_mock::MockServer;
-use vault_store::{StoreConnConfig, StoreRegistry};
+use vault_store::{
+    DocMode, PreparedStoreDoc, StoreConnConfig, StoreDocContext, StoreDocScope, StoreRegistry,
+};
 
 use crate::gate::InteractiveGate;
 use crate::preflight;
@@ -72,11 +74,30 @@ fn load_suite(suite_path: &str) -> Result<Suite, i32> {
     }
 }
 
-fn validate_environment_stores(suite: &Suite, environment: &vault_dsl::Environment) -> Vec<String> {
+fn validate_environment_stores(
+    suite: &Suite,
+    environment: &vault_dsl::Environment,
+    active_tests: &HashSet<PathBuf>,
+) -> Vec<String> {
     let configured: HashSet<&str> = environment.stores.keys().map(String::as_str).collect();
     let mut issues = Vec::new();
 
-    for test in &suite.tests {
+    if !active_tests.is_empty() {
+        for kind in suite.config.seed.keys() {
+            if !configured.contains(kind.as_str()) {
+                issues.push(format!(
+                    "{}: global seed uses store `{kind}` but it is not configured in the selected environment",
+                    suite.root.join("vault.yaml").display()
+                ));
+            }
+        }
+    }
+
+    for test in suite
+        .tests
+        .iter()
+        .filter(|test| active_tests.contains(&test.path))
+    {
         let origin = test.path.display();
         for kind in test.def.seed.keys().chain(test.def.verify.stores.keys()) {
             if !configured.contains(kind.as_str()) {
@@ -95,44 +116,136 @@ fn validate_environment_stores(suite: &Suite, environment: &vault_dsl::Environme
     issues
 }
 
-fn validate_all(suite: &Suite, reg: &StoreRegistry) -> Vec<String> {
-    let mut issues: Vec<String> = vault_dsl::validate_suite(suite)
-        .into_iter()
-        .map(|i| i.to_string())
-        .collect();
+#[derive(Default)]
+struct PreparedFixtures {
+    global: IndexMap<String, PreparedStoreDoc>,
+    local: HashMap<PathBuf, IndexMap<String, PreparedStoreDoc>>,
+}
 
-    for t in &suite.tests {
-        let origin = t.path.display().to_string();
-        for (kind, doc) in &t.def.seed {
+fn prepare_all(
+    suite: &mut Suite,
+    reg: &StoreRegistry,
+    selection: Option<&FixtureSelection>,
+) -> (PreparedFixtures, Vec<String>) {
+    let mut issues = Vec::new();
+    let mut prepared = PreparedFixtures::default();
+    let global_origin = suite.root.join("vault.yaml");
+    let global_context = StoreDocContext::new(
+        suite.root.clone(),
+        global_origin.clone(),
+        StoreDocScope::Global,
+    );
+    let prepare_global = selection.is_none_or(|selection| !selection.active.is_empty());
+    if prepare_global {
+        let mut global_docs = IndexMap::new();
+        for (kind, doc) in &suite.config.seed {
             match reg.get(kind) {
                 Some(driver) => {
-                    if let Err(e) = driver.validate_with_suite_root(
-                        doc,
-                        vault_store::DocMode::Seed,
-                        &suite.root,
-                    ) {
-                        issues.push(format!("{origin}: {e}"));
+                    match driver.prepare_with_context(doc, DocMode::Seed, &global_context) {
+                        Ok(doc) => {
+                            global_docs.insert(kind.clone(), doc.doc().clone());
+                            prepared.global.insert(kind.clone(), doc);
+                        }
+                        Err(error) => issues.push(format!("{}: {error}", global_origin.display())),
                     }
                 }
+                None => issues.push(format!(
+                    "{}: unknown store `{kind}` in global seed:",
+                    global_origin.display()
+                )),
+            }
+        }
+        suite.config.seed = global_docs;
+    }
+
+    for t in &mut suite.tests {
+        if selection.is_some_and(|selection| !selection.active.contains(&t.path)) {
+            continue;
+        }
+        let origin = t.path.display().to_string();
+        let context =
+            StoreDocContext::new(suite.root.clone(), t.path.clone(), StoreDocScope::Local);
+        let mut local_docs = IndexMap::new();
+        let mut local_prepared = IndexMap::new();
+        for (kind, doc) in &t.def.seed {
+            match reg.get(kind) {
+                Some(driver) => match driver.prepare_with_context(doc, DocMode::Seed, &context) {
+                    Ok(doc) => {
+                        local_docs.insert(kind.clone(), doc.doc().clone());
+                        local_prepared.insert(kind.clone(), doc);
+                    }
+                    Err(error) => issues.push(format!("{origin}: {error}")),
+                },
                 None => issues.push(format!("{origin}: unknown store `{kind}` in seed:")),
             }
         }
+        t.def.seed = local_docs;
         for (kind, doc) in &t.def.verify.stores {
             match reg.get(kind) {
                 Some(driver) => {
-                    if let Err(e) = driver.validate_with_suite_root(
-                        doc,
-                        vault_store::DocMode::Verify,
-                        &suite.root,
-                    ) {
+                    if let Err(e) = driver.validate_with_context(doc, DocMode::Verify, &context) {
                         issues.push(format!("{origin}: {e}"));
                     }
                 }
                 None => issues.push(format!("{origin}: unknown store `{kind}` in verify:")),
             }
         }
+
+        if selection.is_none_or(|selection| selection.with_global.contains(&t.path)) {
+            for (kind, local) in &local_prepared {
+                if let Some(global) = prepared.global.get(kind) {
+                    let mut effective = global.clone();
+                    if let Err(error) = effective.append(local.clone()) {
+                        issues.push(format!("{origin}: {error}"));
+                    }
+                }
+            }
+        }
+        prepared.local.insert(t.path.clone(), local_prepared);
     }
-    issues
+
+    (prepared, issues)
+}
+
+#[derive(Default)]
+struct FixtureSelection {
+    active: HashSet<PathBuf>,
+    with_global: HashSet<PathBuf>,
+}
+
+fn fixture_selection(suite: &Suite, plan: &Plan<'_>) -> FixtureSelection {
+    let tests_by_name: HashMap<&str, &vault_dsl::LoadedTest> = suite
+        .tests
+        .iter()
+        .map(|test| (test.def.test.as_str(), test))
+        .collect();
+    let mut selection = FixtureSelection::default();
+    for flow in &plan.flows {
+        let mut reset_pending = flow.def.reset == vault_dsl::FlowReset::Once;
+        for stage in &flow.def.stages {
+            if let Some(test) = tests_by_name.get(stage.test.as_str()) {
+                if test.def.skip.reason().is_none() {
+                    selection.active.insert(test.path.clone());
+                    if flow.def.reset == vault_dsl::FlowReset::Each
+                        || reset_pending
+                        || flow.def.on_failure == vault_dsl::FlowOnFailure::Continue
+                    {
+                        selection.with_global.insert(test.path.clone());
+                    }
+                    if reset_pending {
+                        reset_pending = false;
+                    }
+                }
+            }
+        }
+    }
+    for test in &plan.standalone {
+        if test.def.skip.reason().is_none() {
+            selection.active.insert(test.path.clone());
+            selection.with_global.insert(test.path.clone());
+        }
+    }
+    selection
 }
 
 struct Plan<'s> {
@@ -257,22 +370,53 @@ fn report_aware_exit_code(run_exit_code: i32, report_write_failed: bool) -> i32 
     }
 }
 
-pub fn list(pattern: Option<String>, tags: Vec<String>, suite_dir: String) -> i32 {
-    let suite = match load_suite(&suite_dir) {
+pub fn list(pattern: Option<String>, tags: Vec<String>, suite_dir: String, fixtures: bool) -> i32 {
+    let mut suite = match load_suite(&suite_dir) {
         Ok(s) => s,
         Err(c) => return c,
     };
-    let plan = match plan(&suite, &pattern, &tags) {
+    if fixtures {
+        let issues: Vec<String> = vault_dsl::validate_suite(&suite)
+            .into_iter()
+            .map(|issue| issue.to_string())
+            .collect();
+        if !issues.is_empty() {
+            for issue in &issues {
+                eprintln!("{} {issue}", "✗".red());
+            }
+            eprintln!("\n{} {} issue(s)", "invalid:".red().bold(), issues.len());
+            return 2;
+        }
+    }
+    let mut selected_plan = match plan(&suite, &pattern, &tags) {
         Ok(p) => p,
         Err(c) => return c,
     };
-    for f in &plan.flows {
+    let mut prepared = PreparedFixtures::default();
+    if fixtures {
+        let selection = fixture_selection(&suite, &selected_plan);
+        drop(selected_plan);
+        let (resolved, issues) = prepare_all(&mut suite, &registry(), Some(&selection));
+        if !issues.is_empty() {
+            for issue in &issues {
+                eprintln!("{} {issue}", "✗".red());
+            }
+            eprintln!("\n{} {} issue(s)", "invalid:".red().bold(), issues.len());
+            return 2;
+        }
+        prepared = resolved;
+        selected_plan = match plan(&suite, &pattern, &tags) {
+            Ok(plan) => plan,
+            Err(code) => return code,
+        };
+    }
+    for f in &selected_plan.flows {
         println!("{} {}", "flow".cyan().bold(), f.def.flow);
         for (i, stage) in f.def.stages.iter().enumerate() {
             println!("    {}. {}", i + 1, stage.test);
         }
     }
-    for t in &plan.standalone {
+    for t in &selected_plan.standalone {
         let tags = if t.def.tags.is_empty() {
             String::new()
         } else {
@@ -282,18 +426,157 @@ pub fn list(pattern: Option<String>, tags: Vec<String>, suite_dir: String) -> i3
     }
     println!(
         "\n{} flows, {} standalone tests",
-        plan.flows.len(),
-        plan.standalone.len()
+        selected_plan.flows.len(),
+        selected_plan.standalone.len()
     );
+    if fixtures {
+        print_fixture_plan(&suite, &selected_plan, &prepared);
+    }
     0
 }
 
+fn print_fixture_plan(suite: &Suite, plan: &Plan<'_>, prepared: &PreparedFixtures) {
+    let tests_by_name: HashMap<&str, &vault_dsl::LoadedTest> = suite
+        .tests
+        .iter()
+        .map(|test| (test.def.test.as_str(), test))
+        .collect();
+
+    println!("\n{}", "resolved SQL fixtures".cyan().bold());
+    let mut printed_any = false;
+
+    for flow in &plan.flows {
+        println!(
+            "  flow {} (reset: {})",
+            flow.def.flow,
+            match flow.def.reset {
+                vault_dsl::FlowReset::Once => "once",
+                vault_dsl::FlowReset::Each => "each",
+            }
+        );
+        let mut first_reset_bound_stage = flow.def.reset == vault_dsl::FlowReset::Once;
+        for (stage_index, stage) in flow.def.stages.iter().enumerate() {
+            let Some(test) = tests_by_name.get(stage.test.as_str()) else {
+                continue;
+            };
+            if test.def.skip.reason().is_some() {
+                println!(
+                    "    {}. {} [skipped; no fixture execution]",
+                    stage_index + 1,
+                    stage.test
+                );
+                continue;
+            }
+            let include_global = flow.def.reset == vault_dsl::FlowReset::Each
+                || first_reset_bound_stage
+                || flow.def.on_failure == vault_dsl::FlowOnFailure::Continue;
+            let conditional_global = flow.def.reset == vault_dsl::FlowReset::Once
+                && !first_reset_bound_stage
+                && flow.def.on_failure == vault_dsl::FlowOnFailure::Continue;
+            let label = if conditional_global {
+                format!(
+                    "    {}. {} [global fixtures run only if initialization is still pending]",
+                    stage_index + 1,
+                    stage.test
+                )
+            } else {
+                format!("    {}. {}", stage_index + 1, stage.test)
+            };
+            printed_any |=
+                print_test_fixture_plan(test, prepared, include_global, &label, "      ");
+            if first_reset_bound_stage {
+                first_reset_bound_stage = false;
+            }
+        }
+    }
+
+    for test in &plan.standalone {
+        if test.def.skip.reason().is_some() {
+            println!("  {} [skipped; no fixture execution]", test.def.test);
+            continue;
+        }
+        printed_any |= print_test_fixture_plan(
+            test,
+            prepared,
+            true,
+            &format!("  {}", test.def.test),
+            "    ",
+        );
+    }
+    if !printed_any {
+        println!("  <none>");
+    }
+}
+
+fn print_test_fixture_plan(
+    test: &vault_dsl::LoadedTest,
+    prepared: &PreparedFixtures,
+    include_global: bool,
+    label: &str,
+    indent: &str,
+) -> bool {
+    let local = prepared.local.get(&test.path);
+    let mut kinds: Vec<&String> = local.into_iter().flat_map(|docs| docs.keys()).collect();
+    if include_global {
+        kinds.extend(prepared.global.keys());
+    }
+    kinds.sort();
+    kinds.dedup();
+
+    let mut lines = Vec::new();
+    for kind in kinds {
+        let effective = match (
+            include_global.then(|| prepared.global.get(kind)).flatten(),
+            local.and_then(|docs| docs.get(kind)),
+        ) {
+            (Some(global), Some(local)) => {
+                let mut combined = global.clone();
+                combined
+                    .append(local.clone())
+                    .expect("effective fixture plan was validated");
+                combined
+            }
+            (Some(global), None) => global.clone(),
+            (None, Some(local)) => local.clone(),
+            (None, None) => continue,
+        };
+        for source in effective.files() {
+            lines.push(format!(
+                "{indent}{}. {} [{}] {} `{}` in `{}` ({})\n{indent}   match `{}` -> `{}`",
+                source.prepared_index + 1,
+                kind,
+                source.scope.as_str(),
+                source.selector_kind,
+                source.selector,
+                source.declaring_yaml.display(),
+                source.yaml_path,
+                source.logical_path.display(),
+                source.resolved_path.display()
+            ));
+        }
+    }
+
+    if lines.is_empty() {
+        return false;
+    }
+    println!("{label}");
+    for line in lines {
+        println!("{line}");
+    }
+    true
+}
+
 pub fn validate(suite_dir: String) -> i32 {
-    let suite = match load_suite(&suite_dir) {
+    let mut suite = match load_suite(&suite_dir) {
         Ok(s) => s,
         Err(c) => return c,
     };
-    let issues = validate_all(&suite, &registry());
+    let mut issues: Vec<String> = vault_dsl::validate_suite(&suite)
+        .into_iter()
+        .map(|issue| issue.to_string())
+        .collect();
+    let (_, store_issues) = prepare_all(&mut suite, &registry(), None);
+    issues.extend(store_issues);
     if issues.is_empty() {
         println!(
             "{} {} tests, {} flows — no issues",
@@ -351,15 +634,39 @@ pub fn print_env(env: String, suite_dir: String) -> i32 {
 }
 
 pub fn run(args: RunArgs) -> i32 {
-    let suite = match load_suite(&args.suite_dir) {
+    let mut suite = match load_suite(&args.suite_dir) {
         Ok(s) => s,
         Err(c) => return c,
     };
     let reg = registry();
-    let issues = validate_all(&suite, &reg);
+    let issues: Vec<String> = vault_dsl::validate_suite(&suite)
+        .into_iter()
+        .map(|issue| issue.to_string())
+        .collect();
     if !issues.is_empty() {
         for i in &issues {
             eprintln!("{} {i}", "✗".red());
+        }
+        eprintln!(
+            "\n{} suite invalid — nothing was executed",
+            "config error:".red().bold()
+        );
+        return 2;
+    }
+    let initial_plan = match plan(&suite, &args.pattern, &args.tags) {
+        Ok(plan) => plan,
+        Err(code) => return code,
+    };
+    if initial_plan.is_empty() {
+        print_empty_selection(&args.pattern, &args.tags);
+        return 2;
+    }
+    let selection = fixture_selection(&suite, &initial_plan);
+    drop(initial_plan);
+    let (_, issues) = prepare_all(&mut suite, &reg, Some(&selection));
+    if !issues.is_empty() {
+        for issue in &issues {
+            eprintln!("{} {issue}", "✗".red());
         }
         eprintln!(
             "\n{} suite invalid — nothing was executed",
@@ -375,7 +682,7 @@ pub fn run(args: RunArgs) -> i32 {
         );
         return 2;
     };
-    let store_issues = validate_environment_stores(&suite, &environment);
+    let store_issues = validate_environment_stores(&suite, &environment, &selection.active);
     if !store_issues.is_empty() {
         for issue in &store_issues {
             eprintln!("{} {issue}", "✗".red());
@@ -395,13 +702,9 @@ pub fn run(args: RunArgs) -> i32 {
     }
 
     let plan = match plan(&suite, &args.pattern, &args.tags) {
-        Ok(p) => p,
-        Err(c) => return c,
+        Ok(plan) => plan,
+        Err(code) => return code,
     };
-    if plan.is_empty() {
-        print_empty_selection(&args.pattern, &args.tags);
-        return 2;
-    }
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async { run_async(args, &suite, plan, reg, environment).await })
@@ -467,6 +770,7 @@ async fn run_async<'s>(
         client: reqwest::Client::new(),
         target_base_url: environment.target.base_url.clone(),
         defaults: suite.config.defaults.clone(),
+        global_seed: suite.config.seed.clone(),
         stores,
         mock,
         gate,

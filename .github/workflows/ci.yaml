@@ -51,7 +51,7 @@ jobs:
       - name: unit and crate tests
         run: cargo test --workspace
 
-      - name: PostgreSQL SQL-file fixture scenarios
+      - name: PostgreSQL SQL fixture selection scenarios
         run: cargo test -p vault-store-postgres --test sql_file -- --ignored --test-threads=1
 
       - name: build

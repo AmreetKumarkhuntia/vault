@@ -60,6 +60,9 @@ enum Command {
         tag: Vec<String>,
         #[arg(long, default_value = "tests/flows")]
         suite_dir: String,
+        /// Show the resolved SQL fixture files in execution order
+        #[arg(long)]
+        fixtures: bool,
     },
     /// Parse and statically validate the whole suite
     Validate {
@@ -126,7 +129,8 @@ fn main() {
             pattern,
             tag,
             suite_dir,
-        } => runcmd::list(pattern, tag, suite_dir),
+            fixtures,
+        } => runcmd::list(pattern, tag, suite_dir, fixtures),
         Command::Validate { suite_dir } => runcmd::validate(suite_dir),
         Command::Env { env, suite_dir } => runcmd::print_env(env, suite_dir),
     };

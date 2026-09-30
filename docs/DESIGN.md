@@ -18,7 +18,7 @@
 | Exit codes | C's `0/1/2/3/130` | Distinguishing config errors (2) from infra errors (3) is what CI dashboards actually need. |
 | Count syntax | A's numeric/operator-map form (`count: 1`, `count: {gte: 1}`) | Consistent with every other matcher in the DSL; no mini-grammar (`exactly 1`) to parse. |
 | Unexpected-change detection | C's `watch:` mode (PK + row-hash snapshot, claim semantics) over A's `unchanged:`/B's `guard:` | Only C's design forces every observed diff to be *explained* by an expectation, which is the actual guarantee users want. |
-| Global config | `testkit.yaml` (A's format) loaded through figment layering (B's mechanism) | Test authors live in YAML — one syntax; figment still gives flags > env > file precedence. |
+| Global config | `vault.yaml` (A's format) loaded through figment layering (B's mechanism) | Test authors live in YAML — one syntax; figment still gives flags > env > file precedence. |
 | Matcher wildcards | A's YAML-tag vocabulary (`!any`, `!uuid`, `!iso8601`, `!near-now`, …) shared across HTTP/DB/Redis/outbound | One vocabulary to learn; tags survive serde cleanly. |
 | Interactive step mode | C's command set on B's TTY-free `Gate` abstraction | Rich inspection UX without the engine knowing about terminals. |
 
@@ -54,7 +54,7 @@ LOAD ─▶ VALIDATE ─▶ RESET ─▶ SEED ─▶ ARM_MOCKS ─▶ RUN_STEPS 
 |---|---|---|
 | LOAD / VALIDATE | Parse all matched YAML; static cross-checks (template refs, step-name ordering, mock names, fixture paths, `deny_unknown_fields` typo detection). | Whole run aborts, exit 2, before any test executes. |
 | RESET | Isolation strategy: `TRUNCATE ... RESTART IDENTITY CASCADE`, `FLUSHDB`, clear mock stubs/recordings. Runs **before** each test. | Test `ERRORED`, skip to REPORT; later tests still run. |
-| SEED | Insert PG rows (one transaction), set Redis keys. | `ERRORED`, fail fast. |
+| SEED | Apply suite-global seed, then test-local seed. PostgreSQL entries share one transaction; set Redis keys. | `ERRORED`, fail fast and roll back the effective PostgreSQL seed. |
 | ARM_MOCKS | Install stub table into the mock hub; recording buffer starts empty. | `ERRORED`. |
 | RUN_STEPS | Per step: render templates → fire request → capture variables → evaluate inline `expect:`. Fail-fast **between** steps (captures downstream would be garbage); collect-all **within** a step. | Assertion failure = `FAILED`; transport/render error = `ERRORED`. |
 | VERIFY_END_STATE | Evaluate `verify:` — postgres, redis, outbound calls. **Always collect-all**, and runs **even if steps FAILED** (not if ERRORED): "response was wrong *and* here's what hit the DB/mocks" is the debugging gold. | `FAILED`. |
@@ -73,13 +73,15 @@ LOAD ─▶ VALIDATE ─▶ RESET ─▶ SEED ─▶ ARM_MOCKS ─▶ RUN_STEPS 
 
 ```
 tests/
-  testkit.yaml              # global config (one per project root)
-  fixtures/                 # PostgreSQL .sql seed files (not discovered as tests)
-  orders/
-    create_order.test.yaml  # one test per file (recommended); a file MAY hold `tests: [...]`
+  shared-fixtures/          # optional fixtures outside the suite
+  flows/
+    vault.yaml              # global config and suite-global seed (one per suite root)
+    fixtures/               # PostgreSQL .sql seed files (not discovered as tests)
+    orders/
+      create_order.test.yaml # one test per file (recommended); a file MAY hold `tests: [...]`
 ```
 
-### 2.2 Global config: `testkit.yaml`
+### 2.2 Global config: `vault.yaml`
 
 ```yaml
 version: 1
@@ -93,6 +95,10 @@ environments:
     mock_server: { bind: 127.0.0.1:0 }        # 0 = ephemeral; `testkit env` prints URLs to export
   ci:
     mock_server: { bind: 0.0.0.0:9099 }       # fixed port when the target's env is baked at container start
+seed:
+  postgres:                                    # reapplied after every reset boundary
+    - sql_file: fixtures/global/00_schema.sql
+    - sql_glob: "fixtures/global/*.seed.sql"
 defaults:
   request: { timeout: 10s, headers: { Content-Type: application/json } }
   mock:    { unmatched: fail }                # fail | respond: {status: 404} | passthrough: <url>
@@ -103,7 +109,7 @@ defaults:
 report: { json: target/testkit-report.json, junit: target/testkit-junit.xml }
 ```
 
-Only `${env.VAR}` / `${env.VAR:-default}` interpolation is allowed here (config-time); the `{{ }}` engine is test-time only. DSNs and the mock bind address are global-config-only — a suite file can never silently point at prod. Layering (figment): CLI flags > `TESTKIT_*` env > `testkit.yaml` > defaults.
+Only `${env.VAR}` / `${env.VAR:-default}` interpolation is allowed here (config-time); the `{{ }}` engine is test-time only. DSNs and the mock bind address are global-config-only — a suite file can never silently point at prod. Layering (figment): CLI flags > environment > `vault.yaml` > defaults. Top-level `seed` is a suite-global baseline: Vault applies it after every reset, before the executing test's local seed.
 
 ### 2.3 Test file shape
 
@@ -128,7 +134,9 @@ verify:  { postgres: [...], redis: [...], calls: [...] }
 ```yaml
 seed:
   postgres:
-    - sql_file: fixtures/big_catalog.sql          # raw SQL escape hatch
+    - sql_file: ../fixtures/big_catalog.sql       # one literal path, relative to this YAML
+    - sql_glob: "../fixtures/catalog/*.sql"       # sorted expansion at this list position
+    - sql_file: ../../shared-fixtures/tenant.sql  # parent traversal and external files allowed
     - sql: "ALTER SEQUENCE orders_id_seq RESTART WITH 1000;"
     - table: users
       conflict: error                             # error (default) | ignore | update
@@ -136,11 +144,35 @@ seed:
         - { id: 1, email: alice@example.com, status: active, created_at: "{{ now() }}" }
 ```
 
-`sql_file` is a static UTF-8 `.sql` file resolved from the canonical suite root. Absolute paths,
-parent traversal, symlink escape, and template expressions in the path are rejected during static
-validation. Its contents may contain multiple PostgreSQL statements but not `psql` meta-commands;
-file contents are not templated. Top-level transaction-control statements are rejected so all
-entries execute in declaration order under Vault's one seed transaction.
+`sql_file` selects one literal UTF-8 `.sql` file. `sql_glob` selects one or more files and must
+contain `*`, `?`, or `**`; `*` and `?` stay within one path segment while `**` is recursive. A glob
+that matches nothing is an error. Matches are sorted by normalized logical path and expanded at the
+selector's position, so numeric prefixes provide deterministic ordering. Duplicate canonical files
+within one effective seed are rejected, including overlap between global and local selectors. No
+SQL is discovered implicitly, and a bare directory is invalid. `**` must occupy a complete path
+segment, and glob parent (`..`) components must precede the first wildcard.
+
+Selectors resolve from the directory containing the YAML that declares them: top-level seed paths
+from `vault.yaml`, and local paths from the individual test file. Parent traversal and absolute
+Unix, Windows-drive, and UNC paths are accepted; resolution never depends on process CWD. `~` and
+shell syntax are not expanded, but config-time `${env.VAR}` may supply a machine-specific absolute
+root. Absolute forms must be native to the current operating system; foreign-platform forms are
+diagnosed instead of reinterpreted. Runtime `{{ ... }}` expressions are rejected in paths. There is
+no fixture-root allowlist.
+
+Vault validates and freezes the full ordered fixture list before opening external connections. At
+execution it re-resolves and re-reads those frozen files, rejecting missing/unreadable files,
+directories, changed symlink targets, invalid UTF-8, and non-lowercase-`.sql` matches. Newly created
+glob matches do not join an active run. File contents may contain multiple PostgreSQL statements but
+are not templated, and `psql` meta-commands are not interpreted. Top-level transaction-control
+statements are rejected so global seed, local files, inline SQL, and structured rows execute in one
+driver-owned transaction and roll back together.
+
+Filesystem-wide selectors make suite YAML trusted configuration: do not run untrusted suites with
+sensitive filesystem access or database credentials. Global DDL must be idempotent when reset mode
+truncates tables rather than dropping them. `vault list --fixtures` prints the frozen order and
+resolved paths without connecting to PostgreSQL; possible later reset-bound plans are marked
+conditional when `reset: once` uses `on_failure: continue`.
 
 `null` → SQL NULL; nested maps/lists → json/jsonb; `!base64` for bytea. Templating applies to
 inline structured/SQL values (`{{ uuid() }}`, `{{ vars.* }}`) but **step captures are statically
@@ -272,10 +304,10 @@ verify:
 
 ### 2.9 Reuse
 
-YAML anchors are available natively within a file. PostgreSQL `sql_file` is the only currently
-supported file-backed seed mechanism. Generic YAML `fixture:` entries, `$include` deep-merge, and
-`_suite.yaml` inheritance are planned capabilities, not implemented behavior. There is no test
-inheritance or `matrix:` in v1 (`matrix` is reserved).
+YAML anchors are available natively within a file. PostgreSQL `sql_file` and `sql_glob` are the
+currently supported file-backed seed mechanisms. Generic YAML `fixture:` entries, `$include`
+deep-merge, and `_suite.yaml` inheritance are planned capabilities, not implemented behavior.
+There is no test inheritance or `matrix:` in v1 (`matrix` is reserved).
 
 ### 2.10 Full example
 
@@ -394,7 +426,7 @@ on_failure: skip-rest          # remaining stages report SKIPPED(dependency fail
 
 - **Referenced tests stay independently runnable.** A test consumed by a flow declares its inputs as `vars:` with defaults (or marks them `required: true`, in which case running it standalone without `--var` is a validation error). `with:` overrides those vars; nothing inside the test file knows about flows.
 - **Exports are explicit.** `export: [order_id]` promotes a stage's captures to `{{ flow.order_id }}`; the fully-qualified `{{ flow.stages.<stage>.captures.* }}` namespace always exists. Values stay JSON-typed end to end. VALIDATE statically rejects a `{{ flow.* }}` reference that no earlier stage exports.
-- **Isolation:** with `reset: once`, RESET (TRUNCATE/FLUSHDB/mock clear) runs before stage 1 only; later stages' `seed:` blocks still apply additively. Each stage arms its own mocks and runs its own `verify:` — mock recording buffers are per-stage, so `verify.calls` never sees a previous stage's traffic. `watch:` snapshots are per-stage.
+- **Isolation:** with `reset: once`, RESET (TRUNCATE/FLUSHDB/mock clear) and suite-global seed run before the first stage that actually enters its lifecycle; later stages' local `seed:` blocks still apply additively. With `reset: each`, reset and global seed repeat for every executing stage. Each stage arms its own mocks and runs its own `verify:` — mock recording buffers are per-stage, so `verify.calls` never sees a previous stage's traffic. `watch:` snapshots are per-stage.
 - **Failure:** a FAILED/ERRORED stage stops the chain (`skip-rest` default); downstream stages report `SKIPPED (dependency 'create order happy path' failed)` — never silently green. Run exit code is 1.
 - **CLI:** `testkit run 'order lifecycle'` runs the flow; `testkit run 'order lifecycle:delete order'` runs the chain **up to and including** that stage (earlier stages are prerequisites, never skipped). `testkit list` shows flows expanded with stage order. `--step` pauses across stage boundaries too.
 - **Shuffle:** a flow shuffles as one atomic unit; stages never reorder internally.
@@ -437,20 +469,41 @@ use serde_json::Value;
 pub type StoreDoc = Value;
 pub enum DocMode { Seed, Verify, Reset, Watch }
 
+/// Exact YAML declaration site used for file-backed document resolution.
+pub struct StoreDocContext {
+    pub suite_root: PathBuf,
+    pub declaring_yaml: PathBuf,
+    pub scope: StoreDocScope, // Global | Local
+}
+
 /// One per store KIND ("postgres", "redis", later "mysql"), registered by the CLI.
 #[async_trait]
 pub trait StoreDriver: Send + Sync {
     fn kind(&self) -> &'static str;
     /// Static validation at suite-load time, templates as placeholders, no I/O.
     fn validate(&self, doc: &StoreDoc, mode: DocMode) -> Result<(), ValidationError>;
-    /// Suite-aware validation for file-backed documents. Existing drivers inherit
-    /// a default implementation that delegates to `validate`.
+    /// Legacy suite-root-aware API retained for downstream compatibility.
     fn validate_with_suite_root(
         &self,
         doc: &StoreDoc,
         mode: DocMode,
         suite_root: &Path,
     ) -> Result<(), ValidationError>;
+    /// Declaration-aware validation. The default delegates through the legacy API.
+    fn validate_with_context(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        context: &StoreDocContext,
+    ) -> Result<(), ValidationError>;
+    /// Freeze file selections into an owned execution document. Drivers without
+    /// file-backed entries inherit validate-and-clone behavior.
+    fn prepare_with_context(
+        &self,
+        doc: &StoreDoc,
+        mode: DocMode,
+        context: &StoreDocContext,
+    ) -> Result<PreparedStoreDoc, ValidationError>;
     async fn connect(&self, cfg: &StoreConnConfig) -> Result<Arc<dyn StateStore>, StoreError>;
 }
 
@@ -643,7 +696,7 @@ Any end-state assertion accepts `eventually: 5s` or the long form `{timeout, int
 testkit [--no-color] <command>    # global; also honors NO_COLOR and CLICOLOR=0
 testkit run [PATTERN]              # all tests, or glob over suite/test names: 'orders/*', orders/create_order
     --tag <t>            repeatable, AND semantics
-    --env <name>         environment from testkit.yaml (default: local)
+    --env <name>         environment from vault.yaml (default: local)
     --step               pause at lifecycle boundaries (implies serial, requires TTY — else exit 2)
     --break-at <test:step>
     --shuffle [--seed N] # order-independence audit

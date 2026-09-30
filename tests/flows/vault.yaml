@@ -12,6 +12,13 @@ environments:
     mock_server:
       bind: 127.0.0.1:9095
 
+# Suite-global PostgreSQL fixtures run after every reset boundary. Paths here are
+# resolved from this vault.yaml file, and each glob is expanded in sorted order.
+seed:
+  postgres:
+    - sql_file: fixtures/global/00_fixture_registry.sql
+    - sql_glob: "fixtures/global/*.seed.sql"
+
 defaults:
   request:
     timeout: 10s

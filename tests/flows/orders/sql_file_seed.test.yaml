@@ -1,11 +1,17 @@
 test: SQL file fixture seeds an order
-description: A suite-root-relative multi-statement SQL file composes with later seed entries
+description: Declaration-relative exact, glob, and external SQL files compose in order
 tags: [orders, fixtures, smoke]
 
 seed:
   postgres:
-    - sql_file: fixtures/sql_file_order.sql
-    - sql: "UPDATE orders SET status = 'fixture-ready' WHERE id = 7101;"
+    # Exact and glob paths resolve from this test file's orders/ directory.
+    - sql_file: ../fixtures/sql_file_order.sql
+    - sql_glob: "../fixtures/sql_file_order/*.sql"
+    # Parent traversal is allowed; this fixture lives outside the suite directory.
+    - sql_file: ../../shared-fixtures/sql_file_order_external.sql
+    - sql: >-
+        UPDATE orders SET status = 'fixture-ready'
+        WHERE id = 7101 AND status = 'fixture-external';
 
 steps:
   - name: fetch fixture order
@@ -21,6 +27,8 @@ steps:
 
 verify:
   postgres:
+    - table: vault_fixture_baseline
+      expect: [{ fixture_key: suite-global, fixture_value: loaded }]
     - table: users
       expect: [{ id: 7001, email: sql-fixture@example.com, status: active, plan: pro }]
     - table: wallets
