@@ -1,3 +1,8 @@
+## v0.6.0 (2026-10-03)
+
+### Features
+- add offline HTML execution reports (1ef044a)
+
 ## v0.5.0 (2026-09-30)
 
 ### Features
