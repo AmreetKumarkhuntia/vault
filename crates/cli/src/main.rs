@@ -50,6 +50,9 @@ enum Command {
         /// Write JUnit XML here (overrides config)
         #[arg(long)]
         junit: Option<String>,
+        /// Write a standalone offline HTML report here (overrides config)
+        #[arg(long)]
+        html: Option<String>,
         #[arg(long, short)]
         verbose: bool,
     },
@@ -112,6 +115,7 @@ fn main() {
             seed,
             report,
             junit,
+            html,
             verbose,
         } => runcmd::run(runcmd::RunArgs {
             pattern,
@@ -123,6 +127,7 @@ fn main() {
             seed,
             report,
             junit,
+            html,
             verbose,
         }),
         Command::List {

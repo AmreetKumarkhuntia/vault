@@ -26,6 +26,7 @@ pub struct RunArgs {
     pub seed: Option<u64>,
     pub report: Option<String>,
     pub junit: Option<String>,
+    pub html: Option<String>,
     pub verbose: bool,
 }
 
@@ -334,6 +335,7 @@ fn write_requested_reports(
     run: &RunResult,
     json_path: Option<String>,
     junit_path: Option<String>,
+    html: Option<(&vault_report::HtmlReport, String)>,
 ) -> Vec<ReportWriteFailure> {
     let mut failures = Vec::new();
 
@@ -353,6 +355,17 @@ fn write_requested_reports(
             Ok(()) => println!("{} JUnit report: {path}", "→".cyan()),
             Err(error) => failures.push(ReportWriteFailure {
                 format: "JUnit",
+                path,
+                error,
+            }),
+        }
+    }
+
+    if let Some((report, path)) = html {
+        match vault_report::write_html(report, &path) {
+            Ok(()) => println!("{} HTML report: {path}", "→".cyan()),
+            Err(error) => failures.push(ReportWriteFailure {
+                format: "HTML",
                 path,
                 error,
             }),
@@ -575,6 +588,9 @@ pub fn validate(suite_dir: String) -> i32 {
         .into_iter()
         .map(|issue| issue.to_string())
         .collect();
+    if let Err(error) = vault_report::Redactor::new(&suite.config.report.redact) {
+        issues.push(format!("report.redact: {error}"));
+    }
     let (_, store_issues) = prepare_all(&mut suite, &registry(), None);
     issues.extend(store_issues);
     if issues.is_empty() {
@@ -639,6 +655,13 @@ pub fn run(args: RunArgs) -> i32 {
         Err(c) => return c,
     };
     let reg = registry();
+    let redactor = match vault_report::Redactor::new(&suite.config.report.redact) {
+        Ok(redactor) => redactor,
+        Err(error) => {
+            eprintln!("{} report.redact: {error}", "config error:".red().bold());
+            return 2;
+        }
+    };
     let issues: Vec<String> = vault_dsl::validate_suite(&suite)
         .into_iter()
         .map(|issue| issue.to_string())
@@ -707,7 +730,7 @@ pub fn run(args: RunArgs) -> i32 {
     };
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    runtime.block_on(async { run_async(args, &suite, plan, reg, environment).await })
+    runtime.block_on(async { run_async(args, &suite, plan, reg, environment, redactor).await })
 }
 
 async fn run_async<'s>(
@@ -716,7 +739,14 @@ async fn run_async<'s>(
     plan: Plan<'s>,
     reg: StoreRegistry,
     environment: vault_dsl::Environment,
+    mut redactor: vault_report::Redactor,
 ) -> i32 {
+    // Private credential discovery lets diagnostics redact connection secrets
+    // echoed as plain text, without copying configuration into the report.
+    redactor.discover(&json!(environment.target.base_url));
+    for config in environment.stores.values() {
+        redactor.discover(&json!(config.url));
+    }
     let mut stores: IndexMap<String, Arc<dyn vault_store::StateStore>> = IndexMap::new();
     for (kind, cfg) in &environment.stores {
         let Some(driver) = reg.get(kind) else {
@@ -794,15 +824,65 @@ async fn run_async<'s>(
         .chain(standalone.into_iter().map(Item::Test))
         .collect();
 
-    if args.shuffle {
+    let shuffle_seed = if args.shuffle {
         let seed = args.seed.unwrap_or_else(rand::random);
         println!("{} shuffle seed: {seed}", "→".cyan());
         use rand::{seq::SliceRandom, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         items.shuffle(&mut rng);
+        Some(seed)
+    } else {
+        None
+    };
+
+    let html_path = args.html.clone().or(suite.config.report.html.clone());
+    let collect_evidence = html_path.is_some();
+    let mut report_items = Vec::new();
+    let mut report_tests = Vec::new();
+    let mut descriptor_offsets = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let item_id = format!("item-{}", index + 1);
+        descriptor_offsets.push(report_tests.len());
+        match item {
+            Item::Test(test) => {
+                report_items.push(json!({
+                    "id": item_id, "name": test.def.test, "kind": "test",
+                    "description": test.def.description, "tags": test.def.tags,
+                    "source": report_source_path(suite, &test.path),
+                }));
+                let mut descriptor = report_test_descriptor(suite, test);
+                descriptor["id"] = json!(format!("{item_id}-test"));
+                descriptor["item_id"] = json!(item_id);
+                report_tests.push(descriptor);
+            }
+            Item::Flow(flow) => {
+                report_items.push(json!({
+                    "id": item_id, "name": flow.def.flow, "kind": "flow",
+                    "description": flow.def.description, "tags": flow.def.tags,
+                    "source": report_source_path(suite, &flow.path),
+                    "reset": flow.def.reset, "on_failure": flow.def.on_failure,
+                }));
+                for (stage_index, stage) in flow.def.stages.iter().enumerate() {
+                    let test = suite
+                        .tests
+                        .iter()
+                        .find(|test| test.def.test == stage.test)
+                        .expect("flow references were statically validated");
+                    let mut descriptor = report_test_descriptor(suite, test);
+                    descriptor["id"] = json!(format!("{item_id}-stage-{}", stage_index + 1));
+                    descriptor["item_id"] = json!(item_id);
+                    descriptor["flow"] = json!(flow.def.flow);
+                    descriptor["stage_index"] = json!(stage_index);
+                    descriptor["export"] = json!(stage.export);
+                    descriptor["with"] = json!(stage.with);
+                    report_tests.push(descriptor);
+                }
+            }
+        }
     }
 
     let started = std::time::Instant::now();
+    let started_at = chrono::Utc::now().to_rfc3339();
     let mut run = RunResult {
         schema_version: 1,
         environment: args.env.clone(),
@@ -811,29 +891,90 @@ async fn run_async<'s>(
     };
 
     let empty = IndexMap::new();
-    for item in items {
+    let mut executions = Vec::new();
+    for (item_index, item) in items.into_iter().enumerate() {
         if runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
         match item {
             Item::Test(t) => {
-                let result = runner.run_test(&t.def, &empty, true, None, None).await;
+                let descriptor = &mut report_tests[descriptor_offsets[item_index]];
+                descriptor["result_index"] = json!(run.tests.len());
+                let (result, evidence) = runner
+                    .run_test_for_reporting(&t.def, &empty, true, None, None, collect_evidence)
+                    .await;
+                for source in &evidence.redaction_sources {
+                    redactor.discover(source);
+                }
+                if collect_evidence {
+                    descriptor["execution_index"] = json!(executions.len());
+                    executions.push(
+                        serde_json::to_value(evidence).expect("execution evidence serializes"),
+                    );
+                }
                 run.tests.push(result);
             }
             Item::Flow(f) => {
-                let outcome = runner.run_flow(&f.def, &tests_by_name).await;
+                let (outcome, evidence) = runner
+                    .run_flow_for_reporting(&f.def, &tests_by_name, collect_evidence)
+                    .await;
+                for (index, evidence) in evidence.into_iter().enumerate() {
+                    for source in &evidence.redaction_sources {
+                        redactor.discover(source);
+                    }
+                    if collect_evidence {
+                        report_tests[descriptor_offsets[item_index] + index]["execution_index"] =
+                            json!(executions.len());
+                        executions.push(
+                            serde_json::to_value(evidence).expect("execution evidence serializes"),
+                        );
+                    }
+                }
+                for index in 0..outcome.results.len() {
+                    report_tests[descriptor_offsets[item_index] + index]["result_index"] =
+                        json!(run.tests.len() + index);
+                }
                 run.tests.extend(outcome.results);
             }
         }
     }
     run.duration_ms = started.elapsed().as_millis() as u64;
 
+    let run_exit_code = run.exit_code();
+    let mut metadata = json!({
+        "started_at": started_at, "suite": suite.root.display().to_string(),
+        "pattern": args.pattern, "tags": args.tags, "shuffle_seed": shuffle_seed,
+        "items": report_items, "tests": report_tests,
+    });
+    // Discover across all surfaces before masking: a captured credential may
+    // also occur in an earlier response, diagnostic, or recorded request.
+    redactor.discover(&serde_json::to_value(&run).expect("run results serialize"));
+    redactor.discover_metadata(&metadata);
+    for evidence in &executions {
+        redactor.discover_execution(evidence);
+    }
+    redactor.sanitize_run(&mut run);
+    redactor.sanitize_metadata(&mut metadata);
+    for evidence in &mut executions {
+        redactor.sanitize_execution(evidence);
+    }
+
     vault_report::print_run(&run, args.verbose);
 
-    let run_exit_code = run.exit_code();
+    let html_report = html_path.as_ref().map(|_| vault_report::HtmlReport {
+        schema_version: 1,
+        run: serde_json::to_value(&run).expect("run results serialize"),
+        metadata,
+        executions,
+    });
     let json_path = args.report.or(suite.config.report.json.clone());
     let junit_path = args.junit.or(suite.config.report.junit.clone());
-    let report_failures = write_requested_reports(&run, json_path, junit_path);
+    let report_failures = write_requested_reports(
+        &run,
+        json_path,
+        junit_path,
+        html_report.as_ref().zip(html_path),
+    );
     for failure in &report_failures {
         eprintln!(
             "{} could not write {} report to {}: {}",
@@ -845,4 +986,21 @@ async fn run_async<'s>(
     }
 
     report_aware_exit_code(run_exit_code, !report_failures.is_empty())
+}
+
+fn report_source_path(suite: &Suite, path: &Path) -> String {
+    path.strip_prefix(&suite.root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn report_test_descriptor(suite: &Suite, test: &vault_dsl::LoadedTest) -> Value {
+    json!({
+        "name": test.def.test, "description": test.def.description,
+        "tags": test.def.tags, "source": report_source_path(suite, &test.path),
+        "flow": null, "stage_index": null, "export": [], "with": {},
+        "step_names": test.def.steps.iter().map(|step| &step.name).collect::<Vec<_>>(),
+        "result_index": null, "execution_index": null,
+    })
 }

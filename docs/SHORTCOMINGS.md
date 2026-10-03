@@ -26,7 +26,7 @@ reason, fix, pull request, and first fixed release remain traceable.
 | 4 | VLT-003 | Open | S | Missing environment values are resolved leniently |
 | 5 | VLT-004 | Open | S | Static validation is not environment-aware |
 | 6 | VLT-005 | Open | M | Write-capable tests have no enforced safety gate |
-| 7 | VLT-006 | Open | M | Mock recordings can expose secrets in failure reports |
+| 7 | VLT-006 | Done | M | Mock recordings can expose secrets in failure reports |
 | 8 | VLT-007 | Open | M | Failure matrices require duplicated tests |
 | 9 | VLT-008 | Open | L | Target process lifecycle is external to Vault |
 | 10 | VLT-009 | Open | L | Concurrent request scenarios cannot be expressed |
@@ -204,6 +204,14 @@ infer safety solely from HTTP methods or tag spelling.
 - Configuration and CLI errors occur before preflight or test requests.
 
 ## VLT-006: Mock recordings can expose secrets in failure reports
+
+**Status.** Implemented. CLI report copies are masked after matching and flow exports complete,
+before terminal summaries, JSON, JUnit, and HTML are rendered. Standard credential headers and
+common secret fields are masked by default; `report.redact` adds headers, fields, JSONPath
+selectors, and text patterns. Private request, response-header, capture, and mock credential
+sources prevent echoed secrets from leaking even when HTML lifecycle tracing is disabled.
+Dedicated integration tests cover report formats, raw matching, partial failures, and protected
+report identities. Live interactive inspection remains separate from generated reports.
 
 **Problem.** Failed tests retain complete mocked-dependency request headers and bodies. Those
 recordings are serialized into JSON reports without a redaction pass.

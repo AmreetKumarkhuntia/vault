@@ -1,0 +1,6 @@
+test: report transport error
+steps:
+  - name: unavailable server
+    request: { method: GET, url: "http://127.0.0.1:1/unavailable" }
+  - name: not reached
+    request: { method: GET, path: /pass }

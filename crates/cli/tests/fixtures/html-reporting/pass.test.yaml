@@ -1,0 +1,19 @@
+test: redaction pass
+description: capture a credential and reuse it without exposing it in reports
+tags: [reports, redaction]
+steps:
+  - name: capture secret
+    request:
+      method: GET
+      path: /secret
+      headers: { Authorization: "Bearer cli-secret-sentinel", X-Private: cli-custom-sentinel }
+      query: { token: cli-query-sentinel }
+    expect:
+      status: 200
+      json_partial:
+        access_token: cli-secret-sentinel
+        nested: { private: cli-nested-sentinel }
+    capture: { access_token: { jsonpath: $.access_token } }
+  - name: use secret
+    request: { method: GET, path: /pass, query: { token: "{{ access_token }}" } }
+    expect: { status: 200 }

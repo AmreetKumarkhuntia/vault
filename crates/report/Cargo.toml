@@ -9,7 +9,11 @@ repository.workspace = true
 anstream = "1.0.0"
 comfy-table = "8.0.0"
 owo-colors = "4.4.0"
+regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+serde_json_path = "0.7.2"
+url = "2.5.8"
 vault-core = { path = "../core" }
+vault-dsl = { path = "../dsl" }
 vault-store = { path = "../store" }

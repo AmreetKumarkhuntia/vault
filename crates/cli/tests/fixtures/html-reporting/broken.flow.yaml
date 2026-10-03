@@ -1,0 +1,5 @@
+flow: broken report stages
+stages:
+  - test: redaction fail
+  - test: redaction pass
+on_failure: skip-rest

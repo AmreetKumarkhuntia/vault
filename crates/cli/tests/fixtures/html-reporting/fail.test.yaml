@@ -1,0 +1,14 @@
+test: redaction fail
+steps:
+  - name: wrong secret
+    request:
+      method: GET
+      path: /secret
+      headers: { X-Private: cli-custom-sentinel }
+      query: { token: cli-query-sentinel }
+    expect:
+      status: 200
+      json_partial: { access_token: cli-expected-sentinel }
+  - name: downstream request
+    request: { method: GET, path: /pass }
+    expect: { status: 200 }

@@ -702,6 +702,7 @@ testkit run [PATTERN]              # all tests, or glob over suite/test names: '
     --shuffle [--seed N] # order-independence audit
     --report <path>      JSON report (also settable in config)
     --junit <path>       JUnit XML for CI
+    --html <path>        Standalone offline report with flows and execution evidence
     --keep-state-on-failure[=bool]   # default on locally, off in CI profiles
     --quiet | -v | -vv   # dots | steps expanded | wire logs
 testkit list [PATTERN] [--tag t]   # resolved RunPlan, no execution (shares filter code with run)
@@ -730,7 +731,7 @@ priority over `CLICOLOR_FORCE`; glyphs and UTF-8 table borders are preserved.
 
 `run` resolves its filtered plan after static validation but before creating the async runtime or touching stores, mocks, and the target. If no test or flow matches, it names the requested pattern and tags, writes no reports, and exits `2`. `list` deliberately keeps inspection semantics for the same filter: it prints `0 flows, 0 standalone tests` and exits `0`.
 
-**Reports:** pretty terminal tree per test (steps ✓/✗, then verify groups, near-miss tables, one line per passing test); JSON report with `schema_version`, per-test stages/timings, every finding as structured data (kind, yaml_path, expected, near_miss diffs, attempts/elapsed) plus the full `recorded_calls` log for failed tests; optional JUnit XML. All requested JSON/JUnit writes are attempted independently. Any write failure makes the command exit `3`, while successfully written sibling reports remain available. A JSON Schema of the DSL is published for editor validation.
+**Reports:** pretty terminal tree per test (steps ✓/✗, then verify groups, near-miss tables, one line per passing test); JSON v1 with test duration, final HTTP results, structured findings, and failure recordings; optional JUnit XML and offline HTML. HTML uses a companion execution model for actual lifecycle timings, every HTTP attempt, capture provenance, successful verification polling, all observed mock calls, flow-stage identities, and work that did not run. Existing result types and JSON v1 shape remain unchanged. Private credential discovery runs even without detailed HTML tracing; configured masking applies to all generated report copies after matching. All requested HTML/JSON/JUnit writes are attempted independently. Any write failure makes the command exit `3`, while successfully written sibling reports remain available.
 
 ---
 

@@ -1,14 +1,17 @@
 #![deny(clippy::print_stderr, clippy::print_stdout)]
 
-//! Renderers for run results: pretty terminal, JSON, JUnit XML.
-//! All three consume the same structs — the JSON report is lossless with
-//! respect to the terminal output, never a re-parse of it.
+//! Renderers for run results: terminal, JSON, JUnit XML, and offline HTML.
+//! HTML adds opt-in execution evidence without changing the JSON v1 results.
 
+mod html;
 mod junit;
 mod pretty;
+mod redact;
 
+pub use html::{to_html, write_html, HtmlReport};
 pub use junit::to_junit_xml;
 pub use pretty::print_run;
+pub use redact::Redactor;
 
 use vault_core::RunResult;
 

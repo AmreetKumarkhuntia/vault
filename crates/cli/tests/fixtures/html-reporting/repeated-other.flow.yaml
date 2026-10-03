@@ -1,0 +1,4 @@
+flow: repeated report other
+stages:
+  - test: redaction pass
+    export: [access_token]

@@ -2812,9 +2812,13 @@ dependencies = [
  "anstream",
  "comfy-table",
  "owo-colors",
+ "regex",
  "serde",
  "serde_json",
+ "serde_json_path",
+ "url",
  "vault-core",
+ "vault-dsl",
  "vault-store",
 ]
 

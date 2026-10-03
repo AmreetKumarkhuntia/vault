@@ -8,3 +8,5 @@ testkit-junit.xml
 npm/node_modules/
 npm/*.tgz
 npm/bin/.cache/
+
+.archify
