@@ -1,0 +1,8 @@
+flow: repeated report stages
+description: shared test names stay distinct across flow executions
+reset: once
+stages:
+  - test: redaction pass
+    export: [access_token]
+  - test: redaction next
+    with: { access_token: "{{ flow.access_token }}" }

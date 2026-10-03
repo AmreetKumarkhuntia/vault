@@ -169,6 +169,27 @@ pub struct ReportCfg {
     pub json: Option<String>,
     #[serde(default)]
     pub junit: Option<String>,
+    #[serde(default)]
+    pub html: Option<String>,
+    #[serde(default)]
+    pub redact: ReportRedaction,
+}
+
+/// Additional report masking rules. These extend the built-in credential rules;
+/// they are applied to report copies only, after matching and flow exports.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportRedaction {
+    #[serde(default)]
+    pub headers: Vec<String>,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// JSONPath selectors, evaluated against each evidence payload root.
+    #[serde(default)]
+    pub json_paths: Vec<String>,
+    /// Regular expressions whose entire matching text is masked.
+    #[serde(default)]
+    pub text_patterns: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

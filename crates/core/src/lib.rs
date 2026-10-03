@@ -3,6 +3,7 @@
 mod assert_http;
 mod capture;
 mod engine;
+mod execution;
 mod http;
 mod result;
 mod template;
@@ -12,6 +13,7 @@ pub use capture::capture_value;
 pub use engine::{
     FlowOutcome, Gate, GateDecision, NoopGate, PausePoint, PauseSnapshot, TestRunner,
 };
+pub use execution::{ExecutionEvent, ExecutionStatus, TestExecution};
 pub use http::{execute_request, StepResponse};
 pub use result::*;
 pub use template::TemplateEngine;

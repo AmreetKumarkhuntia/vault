@@ -35,7 +35,13 @@ The binary automatically strips ANSI escapes for redirected stdout/stderr. A non
 or `CLICOLOR=0` also disables color and takes priority over `CLICOLOR_FORCE`; an empty `NO_COLOR`
 is treated as unset. Unicode status glyphs remain unchanged, and JSON/JUnit files are never styled.
 
-An empty `run` selection exits `2` before connecting to the target, stores, or mock server; `list` remains a successful zero-result inspection. If a requested JSON or JUnit report cannot be written, Vault still attempts every other requested report and exits `3`.
+An empty `run` selection exits `2` before connecting to the target, stores, or mock server; `list` remains a successful zero-result inspection. If a requested HTML, JSON, or JUnit report cannot be written, Vault still attempts every other requested report and exits `3`.
+
+Generate a standalone offline report for the current run with
+`npx vault --run ./tests/flows --html target/vault-report.html`. It includes clickable flow stages,
+results, lifecycle actions, requests and responses, and failure diffs. Credential fields are
+masked; extend masking with `report.redact` in the suite config. The CLI option overrides
+`report.html` in `vault.yaml`.
 
 Postgres and Redis are optional. An HTTP-only suite simply omits those stores from `vault.yaml` and does not use their seed or verify blocks.
 

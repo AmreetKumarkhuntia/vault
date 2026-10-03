@@ -127,12 +127,58 @@ mock server, running preflight, or writing reports. The equivalent `vault list`
 query remains an inspection command: it prints `0 flows, 0 standalone tests` and
 exits `0`.
 
-After a non-empty run, Vault attempts every requested report write. In particular,
-a JSON write failure does not prevent a requested JUnit report from being written
-(and vice versa). Any report-write failure is printed with its format and path and
+After a non-empty run, Vault attempts every requested HTML, JSON, and JUnit report write.
+A failed write does not prevent the other requested formats from being written.
+Any report-write failure is printed with its format and path and
 makes the command exit `3`; successfully written sibling artifacts are retained.
 `make demo` exercises both safeguards, including report writes from an isolated
 temporary working directory.
+
+### HTML reports
+
+Generate a report for the current run and open the resulting file in a browser:
+
+```sh
+vault run --html target/vault-report.html
+npx vault --run ./tests/flows --html target/vault-report.html
+```
+
+The demo suite enables this output in `vault.yaml`. Your own suite can do the same:
+
+```yaml
+report:
+  html: target/vault-report.html
+  json: target/vault-report.json
+  junit: target/vault-junit.xml
+  redact:
+    headers: [X-Internal-Token]
+    fields: [customer_secret]
+    json_paths: ["$.customer.email"]
+    text_patterns: ['account-secret-[A-Za-z0-9]+']
+```
+
+`--html` overrides the configured HTML path. Relative output paths use the process working
+directory, just like JSON and JUnit. Each run replaces its configured output file. The report is
+one offline HTML file with no external scripts, fonts, or services. Search and status filters
+narrow the visible tests while the run totals remain visible; flow stages link to their test
+details. Failed tests expand automatically, and light/dark themes and print styles are included.
+
+When HTML is requested, Vault records the actual lifecycle: setup, store resets and seeds,
+watch snapshots, mock setup, prepared HTTP requests and responses, retries, captures, verification
+polls, and outbound calls. Earlier evidence survives errors and timeouts; later actions are marked
+as not run. Reset-once flows show state reuse, and repeated test names have distinct stage identities.
+The report shows observed test evidence, not internal target execution or code coverage. Validation,
+empty-selection, and preflight errors occur before a run report exists.
+
+Standard credential headers and common secret fields are masked in terminal output and all
+report formats after matching and flow exports complete. `report.redact` adds header names, field
+names (including query parameters and captures), JSONPath selectors, and regular expressions for
+text payloads and diagnostics. These additions extend the built-in rules. The original values
+remain available to matchers in memory. HTML payload previews are capped at 64 KiB after masking
+and carry a truncation label. The JSON v1 schema and JUnit structure are unchanged.
+
+CI retains separate normal-suite and negative-showcase HTML, JSON, and JUnit reports in the
+`vault-test-reports` artifact for 14 days.
 
 ## HTTP-only suites (no Postgres or Redis)
 
@@ -302,7 +348,7 @@ crates/
   store-redis/     redis driver: seed / FLUSHDB reset / typed key verification
   mock/            recording mock server + outbound-call verification (bipartite matching)
   core/            engine: lifecycle, templating (minijinja), captures, eventually/settle, flows
-  report/          pretty terminal / JSON / JUnit renderers (same structs, lossless)
+  report/          terminal / JSON / JUnit / offline HTML renderers and masking
   cli/             the `vault` binary + black-box CLI tests in cli/tests
 examples/
   demo-target/     the order service the e2e suite runs against

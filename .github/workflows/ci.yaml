@@ -65,18 +65,33 @@ jobs:
           PAYMENTS_URL=http://127.0.0.1:9095/payments \
           EMAIL_URL=http://127.0.0.1:9095/email \
           ./target/debug/demo-target &
-          ./target/debug/vault --no-color run --suite-dir tests/flows -v
+          ./target/debug/vault --no-color run --suite-dir tests/flows -v \
+            --html target/reports/suite/report.html \
+            --report target/reports/suite/report.json \
+            --junit target/reports/suite/junit.xml
 
       - name: negative showcase must fail with exit 1
         env:
           VAULT_RUN_NEGATIVE: ""
         run: |
           set +e
-          ./target/debug/vault run --suite-dir tests/flows -t negative --no-color
+          ./target/debug/vault run --suite-dir tests/flows -t negative --no-color \
+            --html target/reports/negative/report.html \
+            --report target/reports/negative/report.json \
+            --junit target/reports/negative/junit.xml
           code=$?
           set -e
           echo "exit code: $code"
           test "$code" -eq 1
+
+      - name: retain Vault reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vault-test-reports
+          path: target/reports/
+          retention-days: 14
+          if-no-files-found: warn
 
   distribution:
     name: distribution (${{ matrix.target }})

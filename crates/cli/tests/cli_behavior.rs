@@ -101,8 +101,20 @@ fn serve_http(mut stream: TcpStream) -> std::io::Result<()> {
             break;
         }
         request.extend_from_slice(&buffer[..read]);
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
+        if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..end]);
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= end + 4 + length {
+                break;
+            }
         }
     }
 
@@ -112,8 +124,40 @@ fn serve_http(mut stream: TcpStream) -> std::io::Result<()> {
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
-    let (status, body) = match path {
+    if path.split('?').next() == Some("/credential-echo") {
+        let header = |wanted: &str| {
+            request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case(wanted).then(|| value.trim())
+                })
+                .unwrap_or("")
+        };
+        let long = header("X-Long-Token");
+        let encoded = encode_test_component(header("X-Encoded-Credential"));
+        let body = format!(
+            "{long}\nhttp://example.invalid/echo?public_echo={encoded}\npublic_echo={encoded}"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nx-proof: {long}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes())?;
+        return stream.flush();
+    }
+    let (status, body) = match path.split('?').next().unwrap_or(path) {
         "/pass" | "/healthz" => ("200 OK", r#"{"status":"ok"}"#),
+        "/secret"
+            if request
+                .to_ascii_lowercase()
+                .contains("x-private: cli-custom-sentinel") =>
+        {
+            (
+                "200 OK",
+                r#"{"status":"ok","access_token":"cli-secret-sentinel","nested":{"private":"cli-nested-sentinel"},"message":"cli-pattern-hidden","public_echo":"cli-custom-sentinel","public_query":"cli-query-sentinel"}"#,
+            )
+        }
         _ => ("404 Not Found", r#"{"error":"not_found"}"#),
     };
     let response = format!(
@@ -122,6 +166,18 @@ fn serve_http(mut stream: TcpStream) -> std::io::Result<()> {
     );
     stream.write_all(response.as_bytes())?;
     stream.flush()
+}
+
+fn encode_test_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -216,6 +272,16 @@ fn assert_config_reports(sandbox: &TempDir, expected_status: &str, expected_fail
         junit.contains(&format!(r#"failures="{expected_failures}""#)),
         "JUnit report:\n{junit}"
     );
+}
+
+fn html_data(path: &Path) -> serde_json::Value {
+    let html = fs::read_to_string(path).expect("HTML report should exist");
+    let marker = "id=\"vault-report-data\"";
+    let start = html.find(marker).expect("HTML embeds report data");
+    let content = &html[start..];
+    let content = &content[content.find('>').unwrap() + 1..];
+    let content = &content[..content.find("</script>").unwrap()];
+    serde_json::from_str(content).expect("embedded data should be JSON")
 }
 
 fn write_preflight_failure_suite(root: &Path) {
@@ -327,6 +393,7 @@ fn empty_run_fails_before_setup_but_empty_list_succeeds() {
     let run_sandbox = TempDir::new("empty-run");
     let json_path = run_sandbox.path().join("should-not-exist.json");
     let junit_path = run_sandbox.path().join("should-not-exist.xml");
+    let html_path = run_sandbox.path().join("should-not-exist.html");
     let mut run = vault_command(&run_sandbox);
     run.arg("run")
         .arg(MISSING_PATTERN)
@@ -339,7 +406,9 @@ fn empty_run_fails_before_setup_but_empty_list_succeeds() {
         .arg("--report")
         .arg(&json_path)
         .arg("--junit")
-        .arg(&junit_path);
+        .arg(&junit_path)
+        .arg("--html")
+        .arg(&html_path);
     let run_result = output(&mut run);
     assert_exit(&run_result, 2);
 
@@ -353,6 +422,7 @@ fn empty_run_fails_before_setup_but_empty_list_succeeds() {
     );
     assert!(!json_path.exists());
     assert!(!junit_path.exists());
+    assert!(!html_path.exists());
 
     let list_sandbox = TempDir::new("empty-list");
     let mut list = vault_command(&list_sandbox);
@@ -427,6 +497,362 @@ fn passing_run_writes_reports_from_config() {
     let result = output(&mut command);
     assert_exit(&result, 0);
     assert_config_reports(&sandbox, "PASSED", 0);
+    let data = html_data(&sandbox.path().join("config-report.html"));
+    assert_eq!(data["run"]["tests"][0]["status"], "PASSED");
+    assert_eq!(data["run"]["schema_version"], 1);
+    assert!(!data["executions"][0]["events"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn html_flag_overrides_config_and_preserves_selection_metadata() {
+    let sandbox = TempDir::new("html-override");
+    let server = HttpServer::start();
+    let path = sandbox.path().join("nested/run.html");
+    let mut command = configured_run(&sandbox, &server, "report pass");
+    command
+        .arg("--html")
+        .arg(&path)
+        .arg("--shuffle")
+        .arg("--seed")
+        .arg("42");
+    assert_exit(&output(&mut command), 0);
+    assert!(!sandbox.path().join("config-report.html").exists());
+    let data = html_data(&path);
+    assert_eq!(data["metadata"]["pattern"], "report pass");
+    assert_eq!(data["metadata"]["shuffle_seed"], 42);
+    assert_eq!(data["metadata"]["tests"][0]["source"], "pass.test.yaml");
+    assert!(data["metadata"]["started_at"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+    assert!(data["executions"].to_string().contains("/pass"));
+}
+
+#[test]
+fn html_json_and_junit_failures_are_independent() {
+    let server = HttpServer::start();
+    for (format, flag, filename) in [
+        ("HTML", "--html", "config-report.html"),
+        ("JSON", "--report", "config-report.json"),
+        ("JUnit", "--junit", "config-junit.xml"),
+    ] {
+        let sandbox = TempDir::new("independent-reports");
+        let blocker = blocked_report_path(&sandbox, "blocker", filename);
+        let mut command = configured_run(&sandbox, &server, "report pass");
+        command.arg(flag).arg(&blocker);
+        let result = output(&mut command);
+        assert_exit(&result, 3);
+        assert!(
+            text(&result.stderr).contains(&format!("could not write {format} report to")),
+            "stderr: {}",
+            text(&result.stderr)
+        );
+        for sibling in [
+            "config-report.html",
+            "config-report.json",
+            "config-junit.xml",
+        ] {
+            if sibling != filename {
+                assert!(
+                    sandbox.path().join(sibling).exists(),
+                    "{sibling} should survive {format} failure"
+                );
+            }
+        }
+    }
+    let sandbox = TempDir::new("all-report-errors");
+    let mut command = configured_run(&sandbox, &server, "report pass");
+    for (flag, filename) in [
+        ("--html", "report.html"),
+        ("--report", "report.json"),
+        ("--junit", "junit.xml"),
+    ] {
+        command
+            .arg(flag)
+            .arg(blocked_report_path(&sandbox, filename, filename));
+    }
+    let result = output(&mut command);
+    assert_exit(&result, 3);
+    for format in ["HTML", "JSON", "JUnit"] {
+        assert!(text(&result.stderr).contains(&format!("could not write {format} report to")));
+    }
+}
+
+#[test]
+fn html_flow_identity_and_masking_preserve_raw_matching() {
+    let server = HttpServer::start();
+    for (pattern, code) in [("repeated report*", 0), ("broken report stages", 1)] {
+        let sandbox = TempDir::new("masked-flow");
+        let mut command = vault_command(&sandbox);
+        command
+            .arg("run")
+            .arg(pattern)
+            .arg("--suite-dir")
+            .arg(fixture("html-reporting"))
+            .arg("--verbose")
+            .env(TARGET_URL_ENV, server.url());
+        let output = output(&mut command);
+        assert_exit(&output, code);
+        let mut surfaces = vec![text(&output.stdout), text(&output.stderr)];
+        for filename in ["result.html", "result.json", "result.xml"] {
+            surfaces.push(fs::read_to_string(sandbox.path().join(filename)).unwrap());
+        }
+        for secret in [
+            "cli-secret-sentinel",
+            "cli-custom-sentinel",
+            "cli-query-sentinel",
+            "cli-nested-sentinel",
+            "cli-expected-sentinel",
+            "cli-pattern-hidden",
+        ] {
+            assert!(
+                surfaces.iter().all(|surface| !surface.contains(secret)),
+                "secret {secret} leaked into report output"
+            );
+        }
+        let data = html_data(&sandbox.path().join("result.html"));
+        let descriptors = data["metadata"]["tests"].as_array().unwrap();
+        assert_eq!(descriptors.len(), if code == 0 { 3 } else { 2 });
+        assert_ne!(descriptors[0]["id"], descriptors[1]["id"]);
+        assert_eq!(descriptors[0]["stage_index"], 0);
+        if code == 0 {
+            // Flow files are discovered in lexical order: the one-stage
+            // "other" flow precedes the two-stage flow.
+            assert_eq!(descriptors[1]["stage_index"], 0);
+            assert_eq!(descriptors[2]["stage_index"], 1);
+            assert_eq!(descriptors[0]["name"], descriptors[1]["name"]);
+            assert!(data["run"]["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|test| test["status"] == "PASSED"));
+            assert!(data["executions"][0]["exports"]["access_token"]
+                .as_str()
+                .unwrap()
+                .contains("REDACTED"));
+        } else {
+            assert_eq!(descriptors[1]["stage_index"], 1);
+            assert_eq!(data["run"]["tests"][1]["status"], "SKIPPED");
+            assert!(data["executions"].to_string().contains("NOT_RUN"));
+        }
+        let json: serde_json::Value = serde_json::from_str(&surfaces[3]).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert!(json.get("executions").is_none());
+    }
+}
+
+#[test]
+fn html_preserves_transport_error_and_unexecuted_steps() {
+    let sandbox = TempDir::new("html-error");
+    let server = HttpServer::start();
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("report transport error")
+        .arg("--suite-dir")
+        .arg(fixture("html-reporting"))
+        .env(TARGET_URL_ENV, server.url());
+    assert_exit(&output(&mut command), 3);
+    let data = html_data(&sandbox.path().join("result.html"));
+    assert_eq!(data["run"]["tests"][0]["status"], "ERRORED");
+    let events = data["executions"][0]["events"].as_array().unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event["status"] == "ERRORED" && event["step_index"] == 0));
+    assert!(events
+        .iter()
+        .any(|event| event["status"] == "NOT_RUN" && event["step_index"] == 1));
+}
+
+#[test]
+fn invalid_report_masking_is_a_configuration_error_before_execution() {
+    let sandbox = TempDir::new("invalid-mask");
+    let suite = sandbox.path().join("suite");
+    write_preflight_failure_suite(&suite);
+    let config_path = suite.join("vault.yaml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\nreport:\n  html: forbidden.html\n  redact:\n    text_patterns: ['[']\n");
+    fs::write(config_path, config).unwrap();
+    for operation in ["run", "validate"] {
+        let mut command = vault_command(&sandbox);
+        command.arg(operation).arg("--suite-dir").arg(&suite);
+        let result = output(&mut command);
+        assert_exit(&result, 2);
+        assert!(text(&result.stderr).contains("report.redact"));
+        assert!(!sandbox.path().join("forbidden.html").exists());
+    }
+}
+
+#[test]
+fn request_credentials_are_masked_in_report_echoes_without_html_collection() {
+    let sandbox = TempDir::new("mask-without-html");
+    let server = HttpServer::start();
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    let config = fs::read_to_string(fixture("html-reporting").join("vault.yaml"))
+        .unwrap()
+        .replace("  html: result.html\n", "");
+    fs::write(suite.join("vault.yaml"), config).unwrap();
+    fs::copy(
+        fixture("html-reporting").join("pass.test.yaml"),
+        suite.join("pass.test.yaml"),
+    )
+    .unwrap();
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .arg("--verbose")
+        .env(TARGET_URL_ENV, server.url());
+    let result = output(&mut command);
+    assert_exit(&result, 0);
+    assert!(!sandbox.path().join("result.html").exists());
+    let json = fs::read_to_string(sandbox.path().join("result.json")).unwrap();
+    for secret in ["cli-custom-sentinel", "cli-query-sentinel"] {
+        assert!(
+            !json.contains(secret),
+            "request credential echo {secret} leaked without HTML"
+        );
+        assert!(!text(&result.stdout).contains(secret));
+    }
+}
+
+#[test]
+fn long_and_encoded_credential_echoes_are_masked_after_original_matching() {
+    let server = HttpServer::start();
+    let long = format!("cli-long-raw-{}", "abcdef0123456789".repeat(300));
+    let known = "cli-encoded:a/b?c=d&e+f";
+    let encoded = encode_test_component(known);
+    let raw_body =
+        format!("{long}\nhttp://example.invalid/echo?public_echo={encoded}\npublic_echo={encoded}");
+    // Exercise both the private source-only path and full HTML evidence.
+    for collect_html in [false, true] {
+        let sandbox = TempDir::new("long-encoded-credentials");
+        let suite = sandbox.path().join("suite");
+        fs::create_dir_all(&suite).unwrap();
+        let mut config = serde_json::json!({
+            "version": 1,
+            "environments": {"local": {
+                "target": {"base_url": server.url()},
+                "mock_server": {"bind": "127.0.0.1:0"}
+            }},
+            "report": {
+                "json": "result.json", "junit": "result.xml",
+                "redact": {"headers": ["X-Long-Token", "X-Encoded-Credential"]}
+            }
+        });
+        if collect_html {
+            config["report"]["html"] = serde_json::json!("result.html");
+        }
+        fs::write(
+            suite.join("vault.yaml"),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+        let request = serde_json::json!({
+            "method": "GET", "path": "/credential-echo",
+            "headers": {"X-Long-Token": long, "X-Encoded-Credential": known}
+        });
+        for (filename, name, expected_body) in [
+            (
+                "01-pass.test.yaml",
+                "original credential matching".to_owned(),
+                raw_body.clone(),
+            ),
+            (
+                "02-fail.test.yaml",
+                format!("encoded credential echo {encoded}"),
+                "deliberate body mismatch".to_owned(),
+            ),
+        ] {
+            let test = serde_json::json!({
+                "test": name,
+                "steps": [{"name": "echo", "request": request, "expect": {
+                    "status": 200, "headers": {"X-Proof": long}, "body": expected_body
+                }}]
+            });
+            fs::write(
+                suite.join(filename),
+                serde_json::to_vec_pretty(&test).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut command = vault_command(&sandbox);
+        command
+            .arg("run")
+            .arg("--suite-dir")
+            .arg(&suite)
+            .arg("--verbose")
+            .arg("--no-color");
+        let result = output(&mut command);
+        assert_exit(&result, 1);
+        let mut surfaces = vec![
+            ("stdout", text(&result.stdout)),
+            ("stderr", text(&result.stderr)),
+        ];
+        for filename in ["result.json", "result.xml"] {
+            surfaces.push((
+                filename,
+                fs::read_to_string(sandbox.path().join(filename)).unwrap(),
+            ));
+        }
+        if collect_html {
+            surfaces.push((
+                "result.html",
+                fs::read_to_string(sandbox.path().join("result.html")).unwrap(),
+            ));
+        } else {
+            assert!(!sandbox.path().join("result.html").exists());
+        }
+        // The 500-byte body diff and 2000-byte response preview must not expose
+        // even the beginning of a known credential after legacy truncation.
+        for (surface, contents) in &surfaces {
+            for (kind, secret) in [
+                ("long prefix", &long[..80]),
+                ("raw credential", known),
+                ("encoded credential", encoded.as_str()),
+            ] {
+                assert!(
+                    !contents.contains(secret),
+                    "{kind} leaked in {surface} with HTML={collect_html}"
+                );
+            }
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(sandbox.path().join("result.json")).unwrap())
+                .unwrap();
+        let tests = json["tests"].as_array().unwrap();
+        assert_eq!(
+            tests[0]["status"], "PASSED",
+            "original raw body and proof header must still match"
+        );
+        assert_eq!(tests[1]["status"], "FAILED");
+        let checks = tests[1]["steps"][0]["checks"]["checks"].as_array().unwrap();
+        assert_eq!(
+            checks
+                .iter()
+                .filter(|check| check["result"] == "fail")
+                .count(),
+            1
+        );
+        assert_eq!(
+            checks.last().unwrap()["yaml_path"],
+            "steps.echo.expect.body"
+        );
+        assert!(
+            surfaces[0].1.contains("REDACTED"),
+            "the failing terminal body diff should contain a masked preview"
+        );
+        assert!(surfaces[2].1.contains("REDACTED"));
+        assert!(
+            surfaces[3].1.contains("REDACTED"),
+            "JUnit must mask the encoded test name too"
+        );
+    }
 }
 
 #[test]

@@ -9,7 +9,8 @@ use vault_mock::{MockServer, RecordedExchange, Session, SessionGuard};
 use vault_store::matchers::{humantime_ms, MatchCtx};
 use vault_store::{StateStore, VerifyOpts, VerifyOutcome};
 
-use crate::http::{execute_request, StepResponse};
+use crate::execution::{ExecutionCollector, ExecutionStatus, TestExecution};
+use crate::http::{execute_request_with_evidence, StepResponse};
 use crate::result::*;
 use crate::{assert_response, capture_value, CoreError, TemplateEngine};
 
@@ -67,11 +68,52 @@ impl TestRunner {
         flow_scope: Option<&Value>,
         flow_name: Option<&str>,
     ) -> TestResult {
-        self.run_test_tracked(def, extra_vars, do_reset, flow_scope, flow_name)
-            .await
-            .result
+        self.run_test_tracked(
+            def, extra_vars, do_reset, flow_scope, flow_name, false, false,
+        )
+        .await
+        .result
     }
 
+    /// Execute a test with companion evidence without changing legacy results.
+    pub async fn run_test_with_evidence(
+        &self,
+        def: &TestDef,
+        extra_vars: &IndexMap<String, Value>,
+        do_reset: bool,
+        flow_scope: Option<&Value>,
+        flow_name: Option<&str>,
+    ) -> (TestResult, TestExecution) {
+        self.run_test_for_reporting(def, extra_vars, do_reset, flow_scope, flow_name, true)
+            .await
+    }
+
+    /// Capture credential sources for output masking, optionally with full trace.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_test_for_reporting(
+        &self,
+        def: &TestDef,
+        extra_vars: &IndexMap<String, Value>,
+        do_reset: bool,
+        flow_scope: Option<&Value>,
+        flow_name: Option<&str>,
+        collect_details: bool,
+    ) -> (TestResult, TestExecution) {
+        let tracked = self
+            .run_test_tracked(
+                def,
+                extra_vars,
+                do_reset,
+                flow_scope,
+                flow_name,
+                collect_details,
+                true,
+            )
+            .await;
+        (tracked.result, tracked.execution)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn run_test_tracked(
         &self,
         def: &TestDef,
@@ -79,11 +121,20 @@ impl TestRunner {
         do_reset: bool,
         flow_scope: Option<&Value>,
         flow_name: Option<&str>,
+        collect_evidence: bool,
+        collect_sources: bool,
     ) -> TrackedTestResult {
+        let mut evidence = ExecutionCollector::with_sources(collect_evidence, collect_sources);
         if let Some(reason) = def.skip.reason() {
+            let result = TestResult::skipped(&def.test, reason.clone());
+            let event = evidence.start("test", &def.test, None, 0, json!({"reason": reason}));
+            evidence.complete(event, ExecutionStatus::Skipped);
+            self.record_remaining(def, do_reset, &mut evidence);
+            evidence.finalize(&result);
             return TrackedTestResult {
-                result: TestResult::skipped(&def.test, reason),
+                result,
                 initialization: InitializationProgress::default(),
+                execution: evidence.execution,
             };
         }
         let started = Instant::now();
@@ -111,6 +162,7 @@ impl TestRunner {
                 flow_scope,
                 &mut result,
                 &mut initialization,
+                &mut evidence,
             ),
         )
         .await;
@@ -127,12 +179,16 @@ impl TestRunner {
             }
         }
         result.duration_ms = started.elapsed().as_millis() as u64;
+        self.record_remaining(def, do_reset, &mut evidence);
+        evidence.finalize(&result);
         TrackedTestResult {
             result,
             initialization,
+            execution: evidence.execution,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn lifecycle(
         &self,
         def: &TestDef,
@@ -141,7 +197,15 @@ impl TestRunner {
         flow_scope: Option<&Value>,
         result: &mut TestResult,
         initialization: &mut InitializationProgress,
+        evidence: &mut ExecutionCollector,
     ) -> Result<(), CoreError> {
+        let preparation = evidence.start(
+            "preparation",
+            &def.test,
+            None,
+            0,
+            json!({"reset_boundary": do_reset}),
+        );
         let anchor_ms = now_ms();
         let match_ctx = MatchCtx {
             anchor_unix_ms: anchor_ms,
@@ -180,6 +244,7 @@ impl TestRunner {
         // template or incompatible global/local document therefore cannot
         // consume a reset-once flow's pending isolation boundary.
         let seed_docs = self.render_seed_docs(def, &engine, do_reset)?;
+        evidence.complete(preparation, ExecutionStatus::Passed);
 
         if do_reset {
             initialization.started = true;
@@ -190,13 +255,30 @@ impl TestRunner {
                     .get(kind)
                     .cloned()
                     .unwrap_or(Value::Null);
+                let event = evidence.start("reset", kind, None, 1, json!({}));
                 store.reset(&spec).await?;
+                evidence.complete(event, ExecutionStatus::Passed);
             }
         }
 
         for (kind, doc) in &seed_docs {
+            let event = evidence.start(
+                "seed",
+                kind,
+                None,
+                1,
+                json!({
+                    "global": do_reset && self.global_seed.contains_key(kind),
+                    "local": def.seed.contains_key(kind),
+                    "entries": doc.as_array().map(Vec::len),
+                }),
+            );
             let store = self.store(kind)?;
             let receipt = store.seed(doc).await?;
+            if event.is_some() {
+                evidence.detail(event, "receipts", json!(receipt.entries));
+            }
+            evidence.complete(event, ExecutionStatus::Passed);
             result.seed_receipts.extend(receipt.entries);
         }
 
@@ -207,9 +289,18 @@ impl TestRunner {
         let watch_snapshot = if def.watch.is_empty() {
             None
         } else {
+            let event = evidence.start(
+                "watch_snapshot",
+                "postgres",
+                None,
+                1,
+                json!({"tables": def.watch}),
+            );
             let store = self.store("postgres")?;
             let doc = json!(def.watch);
-            Some((store.clone(), doc.clone(), store.snapshot(&doc).await?))
+            let snapshot = store.snapshot(&doc).await?;
+            evidence.complete(event, ExecutionStatus::Passed);
+            Some((store.clone(), doc.clone(), snapshot))
         };
 
         if self.gate_pause(&PausePoint::AfterSeed, def, None, &engine, None)
@@ -218,12 +309,22 @@ impl TestRunner {
             return Err(CoreError::Harness("aborted at seed".into()));
         }
 
+        let mocks = evidence.start(
+            "mock_arm",
+            &def.test,
+            None,
+            1,
+            json!({"dependencies": def.mocks.keys().collect::<Vec<_>>()}),
+        );
         let rendered_mocks = render_mocks(&engine, def)?;
         let guard = self.mock.arm(Session::new(
             &def.test,
             &rendered_mocks,
             self.defaults.mock.unmatched.clone(),
         ));
+
+        evidence.session(guard.session());
+        evidence.complete(mocks, ExecutionStatus::Passed);
 
         if self.gate_pause(&PausePoint::MocksArmed, def, None, &engine, Some(&guard))
             == GateDecision::AbortTest
@@ -232,8 +333,10 @@ impl TestRunner {
         }
 
         let mut last_response: Option<StepResponse> = None;
-        for step in &def.steps {
-            let (step_result, resp) = self.run_step(step, &mut engine, &match_ctx).await?;
+        for (step_index, step) in def.steps.iter().enumerate() {
+            let (step_result, resp) = self
+                .run_step(step, &mut engine, &match_ctx, step_index, evidence)
+                .await?;
             let failed = step_result.status == TestStatus::Failed;
             result.steps.push(step_result);
             last_response = resp;
@@ -279,20 +382,50 @@ impl TestRunner {
         // "response was wrong AND here's what hit the DB" is the debugging gold.
         let mut verify = VerifyOutcome::default();
         for (kind, doc) in &def.verify.stores {
+            let event = evidence.start("verify_store", kind, None, 0, json!({}));
             let store = self.store(kind)?;
             let rendered = engine.render_value(doc)?;
             let outcome = self
-                .poll_verify(store.as_ref(), &rendered, anchor_ms)
+                .poll_verify(store.as_ref(), &rendered, anchor_ms, evidence, event)
                 .await?;
+            evidence.checks(event, &outcome);
+            evidence.complete(
+                event,
+                if outcome.passed() {
+                    ExecutionStatus::Passed
+                } else {
+                    ExecutionStatus::Failed
+                },
+            );
             verify.merge(outcome);
         }
 
         if let Some((store, doc, before)) = watch_snapshot {
-            verify.merge(store.diff_snapshot(&doc, &before).await?);
+            let event = evidence.start(
+                "watch_diff",
+                "postgres",
+                None,
+                1,
+                json!({"tables": def.watch}),
+            );
+            let outcome = store.diff_snapshot(&doc, &before).await?;
+            evidence.checks(event, &outcome);
+            evidence.complete(
+                event,
+                if outcome.passed() {
+                    ExecutionStatus::Passed
+                } else {
+                    ExecutionStatus::Failed
+                },
+            );
+            verify.merge(outcome);
         }
 
         if !def.verify.calls.is_empty() || !def.mocks.is_empty() {
+            let quiet = evidence.start("mock_quiet", &def.test, None, 1, json!({}));
             self.wait_for_mock_quiet(&guard).await;
+            evidence.complete(quiet, ExecutionStatus::Passed);
+            let event = evidence.start("verify_calls", &def.test, None, 1, json!({}));
             let report = guard.drain();
             let unexpected = def
                 .verify
@@ -309,13 +442,23 @@ impl TestRunner {
                         .map_err(|e| CoreError::Harness(format!("verify.calls: {e}")))
                 })
                 .collect::<Result<_, CoreError>>()?;
-            verify.merge(vault_mock::verify_calls(
+            let call_outcome = vault_mock::verify_calls(
                 &report,
                 &rendered_calls,
                 &def.verify.ordered,
                 &unexpected,
                 &match_ctx,
-            ));
+            );
+            evidence.checks(event, &call_outcome);
+            evidence.complete(
+                event,
+                if call_outcome.passed() {
+                    ExecutionStatus::Passed
+                } else {
+                    ExecutionStatus::Failed
+                },
+            );
+            verify.merge(call_outcome);
             if result.status != TestStatus::Passed || !verify.passed() {
                 result.recorded_calls = report
                     .recordings
@@ -337,18 +480,31 @@ impl TestRunner {
         step: &Step,
         engine: &mut TemplateEngine,
         match_ctx: &MatchCtx,
+        step_index: usize,
+        evidence: &mut ExecutionCollector,
     ) -> Result<(StepResult, Option<StepResponse>), CoreError> {
+        let step_event = evidence.start("step", &step.name, Some(step_index), 0, json!({}));
         let deadline = step.repeat.as_ref().map(|r| Instant::now() + r.timeout);
         let mut attempts = 0u32;
         loop {
             attempts += 1;
-            let resp = execute_request(
+            evidence.attempts(step_event, attempts);
+            let attempt = evidence.start(
+                "http_attempt",
+                &step.name,
+                Some(step_index),
+                attempts,
+                json!({}),
+            );
+            let resp = execute_request_with_evidence(
                 &self.client,
                 &self.target_base_url,
                 &step.request,
                 engine,
                 self.defaults.request.timeout,
                 &self.defaults.request.headers,
+                evidence,
+                attempt,
             )
             .await?;
 
@@ -364,6 +520,15 @@ impl TestRunner {
             };
 
             let passed = checks.passed();
+            evidence.checks(attempt, &checks);
+            evidence.complete(
+                attempt,
+                if passed {
+                    ExecutionStatus::Passed
+                } else {
+                    ExecutionStatus::Failed
+                },
+            );
             if !passed {
                 if let Some(d) = deadline {
                     if Instant::now() < d {
@@ -375,7 +540,15 @@ impl TestRunner {
 
             if passed {
                 for (name, spec) in &step.capture {
+                    let capture = evidence.start("capture", name, Some(step_index), 1, json!({}));
                     let value = capture_value(name, spec, &resp)?;
+                    if evidence.collects_sources() {
+                        evidence.source(json!({name: value}));
+                    }
+                    if capture.is_some() {
+                        evidence.detail(capture, "value", value.clone());
+                    }
+                    evidence.complete(capture, ExecutionStatus::Passed);
                     engine.set_flat(name, value.clone());
                     let captures_path = engine
                         .context()
@@ -418,6 +591,7 @@ impl TestRunner {
                 checks,
                 attempts,
             };
+            evidence.complete(step_event, step_result.status.into());
             return Ok((step_result, Some(resp)));
         }
     }
@@ -430,6 +604,8 @@ impl TestRunner {
         store: &dyn StateStore,
         doc: &Value,
         anchor_ms: i64,
+        evidence: &mut ExecutionCollector,
+        event: Option<usize>,
     ) -> Result<VerifyOutcome, CoreError> {
         let settle = self.defaults.verify.settle;
         let interval = self.defaults.verify.poll_interval;
@@ -444,14 +620,48 @@ impl TestRunner {
 
         loop {
             attempts += 1;
+            evidence.attempts(event, attempts);
+            let poll = evidence.start(
+                "verify_poll",
+                store.alias(),
+                None,
+                attempts,
+                json!({"settle_confirmation": false}),
+            );
             let outcome = store.verify(doc, &opts).await?;
+            evidence.checks(poll, &outcome);
+            evidence.complete(
+                poll,
+                if outcome.passed() {
+                    ExecutionStatus::Passed
+                } else {
+                    ExecutionStatus::Failed
+                },
+            );
             if outcome.passed() {
                 if deadline_ms == 0 || settle.is_zero() {
                     return Ok(stamp(outcome, attempts, started));
                 }
                 tokio::time::sleep(settle).await;
                 attempts += 1;
+                evidence.attempts(event, attempts);
+                let poll = evidence.start(
+                    "verify_poll",
+                    store.alias(),
+                    None,
+                    attempts,
+                    json!({"settle_confirmation": true}),
+                );
                 let confirm = store.verify(doc, &opts).await?;
+                evidence.checks(poll, &confirm);
+                evidence.complete(
+                    poll,
+                    if confirm.passed() {
+                        ExecutionStatus::Passed
+                    } else {
+                        ExecutionStatus::Failed
+                    },
+                );
                 if confirm.passed() {
                     return Ok(stamp(confirm, attempts, started));
                 }
@@ -546,19 +756,122 @@ impl TestRunner {
         Ok(docs)
     }
 
+    fn record_remaining(&self, def: &TestDef, do_reset: bool, evidence: &mut ExecutionCollector) {
+        evidence.not_run("preparation", &def.test, None);
+        if do_reset {
+            for kind in self.stores.keys() {
+                evidence.not_run("reset", kind, None);
+            }
+        }
+        let mut seed_kinds: Vec<&String> = def.seed.keys().collect();
+        if do_reset {
+            seed_kinds.extend(self.global_seed.keys());
+        }
+        for kind in seed_kinds {
+            evidence.not_run("seed", kind, None);
+        }
+        if !def.watch.is_empty() {
+            evidence.not_run("watch_snapshot", "postgres", None);
+        }
+        evidence.not_run("mock_arm", &def.test, None);
+        for (index, step) in def.steps.iter().enumerate() {
+            evidence.not_run("step", &step.name, Some(index));
+        }
+        for kind in def.verify.stores.keys() {
+            evidence.not_run("verify_store", kind, None);
+        }
+        if !def.watch.is_empty() {
+            evidence.not_run("watch_diff", "postgres", None);
+        }
+        if !def.mocks.is_empty() || !def.verify.calls.is_empty() {
+            evidence.not_run("mock_quiet", &def.test, None);
+            evidence.not_run("verify_calls", &def.test, None);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_evidence(
+        &self,
+        result: &TestResult,
+        def: Option<&TestDef>,
+        do_reset: bool,
+        index: usize,
+        collect_details: bool,
+        collect_sources: bool,
+    ) -> TestExecution {
+        let mut evidence = ExecutionCollector::with_sources(collect_details, collect_sources);
+        let event = evidence.start(
+            "stage",
+            &result.name,
+            None,
+            0,
+            json!({
+                "reason": result.error.as_ref().or(result.skip_reason.as_ref()),
+            }),
+        );
+        evidence.complete(event, result.status.into());
+        if let Some(def) = def {
+            self.record_remaining(def, do_reset, &mut evidence);
+        }
+        evidence.finalize(result);
+        evidence.execution.flow_stage = Some(index);
+        evidence.execution
+    }
+
     pub async fn run_flow(&self, flow: &FlowDef, tests: &HashMap<String, &TestDef>) -> FlowOutcome {
+        self.run_flow_tracked(flow, tests, false, false).await.0
+    }
+
+    /// Evidence stays aligned with every stage, including skipped/error stages.
+    pub async fn run_flow_with_evidence(
+        &self,
+        flow: &FlowDef,
+        tests: &HashMap<String, &TestDef>,
+    ) -> (FlowOutcome, Vec<TestExecution>) {
+        self.run_flow_for_reporting(flow, tests, true).await
+    }
+
+    /// Collect credential inputs for every stage; detailed tracing is optional.
+    pub async fn run_flow_for_reporting(
+        &self,
+        flow: &FlowDef,
+        tests: &HashMap<String, &TestDef>,
+        collect_details: bool,
+    ) -> (FlowOutcome, Vec<TestExecution>) {
+        self.run_flow_tracked(flow, tests, collect_details, true)
+            .await
+    }
+
+    async fn run_flow_tracked(
+        &self,
+        flow: &FlowDef,
+        tests: &HashMap<String, &TestDef>,
+        collect_evidence: bool,
+        collect_sources: bool,
+    ) -> (FlowOutcome, Vec<TestExecution>) {
         let mut results = Vec::new();
+        let mut executions = Vec::new();
         let mut flow_scope = Map::new();
         let mut chain_broken = false;
         let mut reset_pending = flow.reset == FlowReset::Once;
         let mut isolation_invalid = false;
 
-        for stage in &flow.stages {
+        for (stage_index, stage) in flow.stages.iter().enumerate() {
+            let do_reset = flow.reset == FlowReset::Each || reset_pending;
             let Some(def) = tests.get(&stage.test) else {
-                results.push(TestResult::skipped(
-                    &stage.test,
-                    "unknown test referenced by flow".into(),
-                ));
+                let result =
+                    TestResult::skipped(&stage.test, "unknown test referenced by flow".into());
+                if collect_sources {
+                    executions.push(self.stage_evidence(
+                        &result,
+                        None,
+                        do_reset,
+                        stage_index,
+                        collect_evidence,
+                        collect_sources,
+                    ));
+                }
+                results.push(result);
                 continue;
             };
             if isolation_invalid {
@@ -570,6 +883,16 @@ impl TestRunner {
                     ),
                 );
                 r.flow = Some(flow.flow.clone());
+                if collect_sources {
+                    executions.push(self.stage_evidence(
+                        &r,
+                        Some(def),
+                        do_reset,
+                        stage_index,
+                        collect_evidence,
+                        collect_sources,
+                    ));
+                }
                 results.push(r);
                 continue;
             }
@@ -579,6 +902,16 @@ impl TestRunner {
                     format!("dependency failed earlier in flow `{}`", flow.flow),
                 );
                 r.flow = Some(flow.flow.clone());
+                if collect_sources {
+                    executions.push(self.stage_evidence(
+                        &r,
+                        Some(def),
+                        do_reset,
+                        stage_index,
+                        collect_evidence,
+                        collect_sources,
+                    ));
+                }
                 results.push(r);
                 continue;
             }
@@ -598,16 +931,35 @@ impl TestRunner {
             if let Some(e) = with_error {
                 let mut r = TestResult::skipped(&stage.test, format!("with: render failed: {e}"));
                 r.status = TestStatus::Errored;
+                if collect_sources {
+                    executions.push(self.stage_evidence(
+                        &r,
+                        Some(def),
+                        do_reset,
+                        stage_index,
+                        collect_evidence,
+                        collect_sources,
+                    ));
+                }
                 results.push(r);
                 chain_broken = true;
                 continue;
             }
 
-            let do_reset = flow.reset == FlowReset::Each || reset_pending;
             let tracked = self
-                .run_test_tracked(def, &extra, do_reset, Some(&scope), Some(&flow.flow))
+                .run_test_tracked(
+                    def,
+                    &extra,
+                    do_reset,
+                    Some(&scope),
+                    Some(&flow.flow),
+                    collect_evidence,
+                    collect_sources,
+                )
                 .await;
             let mut result = tracked.result;
+            let mut execution = tracked.execution;
+            execution.flow_stage = Some(stage_index);
 
             if flow.reset == FlowReset::Once && do_reset {
                 if tracked.initialization.completed {
@@ -624,16 +976,25 @@ impl TestRunner {
             for export in &stage.export {
                 if let Some(v) = result.captures.get(export) {
                     flow_scope.insert(export.clone(), v.clone());
+                    if collect_evidence {
+                        execution.exports.insert(export.clone(), v.clone());
+                    }
                 }
             }
             result.flow = Some(flow.flow.clone());
             results.push(result);
+            if collect_sources {
+                executions.push(execution);
+            }
         }
 
-        FlowOutcome {
-            name: flow.flow.clone(),
-            results,
-        }
+        (
+            FlowOutcome {
+                name: flow.flow.clone(),
+                results,
+            },
+            executions,
+        )
     }
 }
 
@@ -646,6 +1007,7 @@ struct InitializationProgress {
 struct TrackedTestResult {
     result: TestResult,
     initialization: InitializationProgress,
+    execution: TestExecution,
 }
 
 pub struct FlowOutcome {

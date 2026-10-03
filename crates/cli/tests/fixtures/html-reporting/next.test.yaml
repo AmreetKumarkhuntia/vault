@@ -1,0 +1,6 @@
+test: redaction next
+vars: { access_token: cli-secret-sentinel }
+steps:
+  - name: reuse flow secret
+    request: { method: GET, path: /pass, query: { token: "{{ vars.access_token }}" } }
+    expect: { status: 200 }

@@ -1,5 +1,4 @@
 version: 1
-
 environments:
   local:
     target:
@@ -7,12 +6,11 @@ environments:
       health_check: { path: /healthz, timeout: 2s }
     mock_server:
       bind: 127.0.0.1:0
-
-defaults:
-  request:
-    timeout: 2s
-
 report:
-  json: config-report.json
-  junit: config-junit.xml
-  html: config-report.html
+  json: result.json
+  junit: result.xml
+  html: result.html
+  redact:
+    headers: [X-Private]
+    json_paths: ["$.nested.private"]
+    text_patterns: ["cli-pattern-[a-z]+"]

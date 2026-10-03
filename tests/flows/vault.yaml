@@ -35,3 +35,4 @@ defaults:
 report:
   json: target/vault-report.json
   junit: target/vault-junit.xml
+  html: target/vault-report.html
