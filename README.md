@@ -136,7 +136,7 @@ temporary working directory.
 
 ### HTML reports
 
-Generate a report for the current run and open the resulting file in a browser:
+Generate reports for the current run and open `target/index.html` in a browser:
 
 ```sh
 vault run --html target/vault-report.html
@@ -158,10 +158,35 @@ report:
 ```
 
 `--html` overrides the configured HTML path. Relative output paths use the process working
-directory, just like JSON and JUnit. Each run replaces its configured output file. The report is
-one offline HTML file with no external scripts, fonts, or services. Search and status filters
-narrow the visible tests while the run totals remain visible; flow stages link to their test
-details. Failed tests expand automatically, and light/dark themes and print styles are included.
+directory, just like JSON and JUnit. Vault already discovers and executes all selected flows
+in one invocation; no shell loop over flows is needed. HTML output includes:
+
+```text
+target/
+├── index.html                  # Names, statuses and links for this invocation
+├── vault-report.html           # Full aggregate report at the requested path
+└── vault-report-pages/
+    ├── flow-001.html
+    ├── flow-002.html
+    └── test-003.html            # Selected standalone tests also get a page
+```
+
+The index follows execution order and includes failed, skipped and unexecuted items. Detail
+pages show only that flow or standalone test and link back to the index. File numbers follow
+the selected item order, so repeated stage names remain distinct within their flow.
+
+Each successful invocation replaces the index and Vault-owned detail pages in that directory;
+it does not accumulate separate runs. Use separate output directories to retain multiple run
+bundles. A small ownership file inside `vault-report-pages/` tracks generated filenames for
+cleanup, not report history. Unrelated files are preserved, and conflicting unowned index or
+detail files cause a report-write error. If `--html` names `index.html` itself, that file contains
+both the flow links and the full aggregate report.
+
+Copy the whole directory to share the index and its relative links. The aggregate report is
+also a standalone offline HTML file; no external scripts, fonts, or services are needed.
+Search and status filters narrow the visible tests while totals remain visible; flow stages
+link to their test details. Failed tests expand automatically, and light/dark themes and print
+styles are included. JSON and JUnit retain their configured paths and aggregate formats.
 
 When HTML is requested, Vault records the actual lifecycle: setup, store resets and seeds,
 watch snapshots, mock setup, prepared HTTP requests and responses, retries, captures, verification

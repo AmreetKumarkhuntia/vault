@@ -702,7 +702,7 @@ testkit run [PATTERN]              # all tests, or glob over suite/test names: '
     --shuffle [--seed N] # order-independence audit
     --report <path>      JSON report (also settable in config)
     --junit <path>       JUnit XML for CI
-    --html <path>        Standalone offline report with flows and execution evidence
+    --html <path>        Offline aggregate report plus sibling index.html and flow pages
     --keep-state-on-failure[=bool]   # default on locally, off in CI profiles
     --quiet | -v | -vv   # dots | steps expanded | wire logs
 testkit list [PATTERN] [--tag t]   # resolved RunPlan, no execution (shares filter code with run)

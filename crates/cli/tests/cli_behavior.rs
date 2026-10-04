@@ -284,6 +284,64 @@ fn html_data(path: &Path) -> serde_json::Value {
     serde_json::from_str(content).expect("embedded data should be JSON")
 }
 
+fn html_files(directory: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(html_files(&path));
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "html")
+        {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files
+}
+
+fn assert_offline_html_links(directory: &Path) {
+    for path in html_files(directory) {
+        let html = fs::read_to_string(&path).unwrap();
+        assert!(
+            !html.contains("<script src="),
+            "external script in {path:?}"
+        );
+        assert!(!html.contains("<link "), "external stylesheet in {path:?}");
+        for link in html.split("href=\"").skip(1) {
+            let href = link.split('"').next().unwrap();
+            if href.starts_with('#') {
+                continue;
+            }
+            assert!(!href.contains(":"), "nonrelative link {href} in {path:?}");
+            let encoded = href.split('#').next().unwrap().as_bytes();
+            let mut decoded = Vec::new();
+            let mut position = 0;
+            while position < encoded.len() {
+                if encoded[position] == b'%' {
+                    decoded.push(
+                        u8::from_str_radix(
+                            std::str::from_utf8(&encoded[position + 1..position + 3]).unwrap(),
+                            16,
+                        )
+                        .unwrap(),
+                    );
+                    position += 3;
+                } else {
+                    decoded.push(encoded[position]);
+                    position += 1;
+                }
+            }
+            let target = path
+                .parent()
+                .unwrap()
+                .join(String::from_utf8(decoded).unwrap());
+            assert!(target.is_file(), "broken link {href} in {path:?}");
+        }
+    }
+}
+
 fn write_preflight_failure_suite(root: &Path) {
     fs::create_dir_all(root).expect("preflight fixture directory should be created");
     fs::write(
@@ -532,6 +590,251 @@ fn html_flag_overrides_config_and_preserves_selection_metadata() {
 }
 
 #[test]
+fn html_bundle_lists_current_five_flows_and_standalone_and_replaces_reruns() {
+    let sandbox = TempDir::new("html-flow-index");
+    let server = HttpServer::start();
+    let suite = sandbox.path().join("suite");
+    let reports = sandbox.path().join("reports");
+    fs::create_dir_all(&suite).unwrap();
+    fs::copy(
+        fixture("reporting").join("vault.yaml"),
+        suite.join("vault.yaml"),
+    )
+    .unwrap();
+    let shared_test = r#"test: shared stage
+vars: { flow_key: default }
+steps:
+  - name: request for this flow
+    request:
+      method: GET
+      path: /pass
+      query: { flow: "{{ vars.flow_key }}" }
+    expect: { status: 200 }
+"#;
+    fs::write(suite.join("shared.test.yaml"), shared_test).unwrap();
+    fs::write(
+        suite.join("shared-next.test.yaml"),
+        shared_test.replace("test: shared stage", "test: shared next stage"),
+    )
+    .unwrap();
+    fs::write(
+        suite.join("standalone.test.yaml"),
+        "test: standalone check\nsteps:\n  - name: standalone request\n    request: { method: GET, path: /pass }\n    expect: { status: 200 }\n",
+    ).unwrap();
+    let flows = ["merchant", "shop", "provider", "zone", "rule"];
+    for (index, name) in flows.iter().enumerate() {
+        fs::write(
+            suite.join(format!("indexed-{index}.flow.yaml")),
+            format!(
+                "flow: {name} CRUD\non_failure: skip-rest\nstages:\n  - test: shared stage\n    with: {{ flow_key: {name}-first }}\n  - test: shared next stage\n    with: {{ flow_key: {name}-second }}\n"
+            ),
+        ).unwrap();
+    }
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .arg("--html")
+        .arg(reports.join("suite #report.html"))
+        .arg("--report")
+        .arg(reports.join("report.json"))
+        .arg("--junit")
+        .arg(reports.join("suite-junit.xml"))
+        .env(TARGET_URL_ENV, server.url());
+    assert_exit(&output(&mut command), 0);
+
+    let aggregate = html_data(&reports.join("suite #report.html"));
+    let items = aggregate["metadata"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 6);
+    assert_eq!(aggregate["run"]["tests"].as_array().unwrap().len(), 11);
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(reports.join("report.json")).unwrap()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["tests"].as_array().unwrap().len(), 11);
+    assert!(json.get("executions").is_none());
+    let junit = fs::read_to_string(reports.join("suite-junit.xml")).unwrap();
+    assert!(junit.contains(r#"tests="11" failures="0" errors="0" skipped="0""#));
+    assert_eq!(junit.matches("<testcase ").count(), 11);
+
+    let index = fs::read_to_string(reports.join("index.html")).unwrap();
+    let mut previous_position = 0;
+    for (position, name) in flows.iter().enumerate() {
+        assert_eq!(items[position]["name"], format!("{name} CRUD"));
+        let row_position = index.find(&format!("{name} CRUD")).unwrap();
+        assert!(
+            row_position > previous_position,
+            "index follows execution order"
+        );
+        previous_position = row_position;
+        let filename = format!("vault-report-pages/flow-{:03}.html", position + 1);
+        assert_eq!(index.matches(&format!(r#"href="{filename}""#)).count(), 1);
+        let detail = html_data(&reports.join(&filename));
+        assert_eq!(detail["metadata"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            detail["metadata"]["items"][0]["name"],
+            format!("{name} CRUD")
+        );
+        assert_eq!(detail["run"]["tests"].as_array().unwrap().len(), 2);
+        assert_eq!(detail["executions"].as_array().unwrap().len(), 2);
+        let descriptors = detail["metadata"]["tests"].as_array().unwrap();
+        assert_eq!(descriptors.len(), 2);
+        assert_ne!(descriptors[0]["id"], descriptors[1]["id"]);
+        for (stage, descriptor) in descriptors.iter().enumerate() {
+            assert_eq!(
+                descriptor["name"],
+                ["shared stage", "shared next stage"][stage]
+            );
+            assert_eq!(descriptor["stage_index"], stage);
+            assert_eq!(descriptor["result_index"], stage);
+            assert_eq!(descriptor["execution_index"], stage);
+        }
+        let evidence = detail["executions"].to_string();
+        assert!(evidence.contains(&format!("{name}-first")));
+        assert!(evidence.contains(&format!("{name}-second")));
+        for other in flows.iter().filter(|other| *other != name) {
+            assert!(!evidence.contains(&format!("{other}-first")));
+        }
+        assert!(fs::read_to_string(reports.join(filename))
+            .unwrap()
+            .contains(r#"href="../index.html""#));
+    }
+    assert!(index.contains("standalone check"));
+    assert!(index.contains(r#"data-status="PASSED""#));
+    let standalone = html_data(&reports.join("vault-report-pages/test-006.html"));
+    assert_eq!(standalone["metadata"]["items"][0]["kind"], "test");
+    assert_eq!(standalone["metadata"]["tests"][0]["result_index"], 0);
+    assert_eq!(standalone["metadata"]["tests"][0]["execution_index"], 0);
+    assert_eq!(standalone["run"]["tests"].as_array().unwrap().len(), 1);
+    assert!(!reports.join(".vault-report-index.json").exists());
+    assert_offline_html_links(&reports);
+
+    // A rerun represents only its own selection and outcome. The next shared
+    // stage remains visible when the first stage fails and skips it.
+    fs::write(
+        suite.join("shared.test.yaml"),
+        shared_test.replace("status: 200", "status: 201"),
+    )
+    .unwrap();
+    fs::write(reports.join("vault-report-pages/notes.html"), "user notes").unwrap();
+    let mut rerun = vault_command(&sandbox);
+    rerun
+        .arg("run")
+        .arg("merchant CRUD")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .arg("--html")
+        .arg(reports.join("suite #report.html"))
+        .arg("--report")
+        .arg(reports.join("report.json"))
+        .arg("--junit")
+        .arg(reports.join("suite-junit.xml"))
+        .env(TARGET_URL_ENV, server.url());
+    for _ in 0..2 {
+        assert_exit(&output(&mut rerun), 1);
+    }
+    let index = fs::read_to_string(reports.join("index.html")).unwrap();
+    assert_eq!(
+        index
+            .matches(r#"href="vault-report-pages/flow-001.html""#)
+            .count(),
+        1
+    );
+    assert!(index.contains("merchant CRUD"));
+    assert!(index.contains(r#"data-status="FAILED""#));
+    for name in flows.iter().skip(1) {
+        assert!(!index.contains(&format!("{name} CRUD")));
+    }
+    assert!(!index.contains("standalone check"));
+    let details = reports.join("vault-report-pages");
+    for ordinal in 2..=5 {
+        assert!(!details.join(format!("flow-{ordinal:03}.html")).exists());
+    }
+    assert!(!details.join("test-006.html").exists());
+    assert_eq!(
+        fs::read_to_string(details.join("notes.html")).unwrap(),
+        "user notes"
+    );
+    let failed = html_data(&details.join("flow-001.html"));
+    assert_eq!(failed["run"]["tests"][0]["status"], "FAILED");
+    assert_eq!(failed["run"]["tests"][1]["status"], "SKIPPED");
+    assert!(failed["executions"][1].to_string().contains("NOT_RUN"));
+    assert_eq!(
+        html_data(&reports.join("suite #report.html"))["metadata"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let moved = sandbox.path().join("downloaded-reports");
+    fs::rename(&reports, &moved).unwrap();
+    assert_offline_html_links(&moved);
+}
+
+#[test]
+fn html_index_path_preserves_aggregate_and_flow_links() {
+    let sandbox = TempDir::new("html-index-as-aggregate");
+    let server = HttpServer::start();
+    let path = sandbox.path().join("reports/index.html");
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("repeated report*")
+        .arg("--suite-dir")
+        .arg(fixture("html-reporting"))
+        .arg("--html")
+        .arg(&path)
+        .env(TARGET_URL_ENV, server.url());
+    for _ in 0..2 {
+        assert_exit(&output(&mut command), 0);
+    }
+    let aggregate = html_data(&path);
+    assert_eq!(aggregate["metadata"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(aggregate["run"]["tests"].as_array().unwrap().len(), 3);
+    let html = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        html.matches(r#"href="vault-report-pages/flow-001.html""#)
+            .count(),
+        1
+    );
+    assert_eq!(
+        html.matches(r#"href="vault-report-pages/flow-002.html""#)
+            .count(),
+        1
+    );
+    assert!(!sandbox.path().join("result.html").exists());
+    assert_offline_html_links(path.parent().unwrap());
+}
+
+#[test]
+fn html_bundle_write_failure_preserves_independent_exports() {
+    let server = HttpServer::start();
+    for blocker in ["index.html", "vault-report-pages"] {
+        let sandbox = TempDir::new("html-bundle-error");
+        let blocked = sandbox.path().join(blocker);
+        if blocker == "index.html" {
+            fs::create_dir(&blocked).unwrap();
+        } else {
+            fs::write(&blocked, "unrelated file").unwrap();
+        }
+        let mut command = configured_run(&sandbox, &server, "report pass");
+        let result = output(&mut command);
+        assert_exit(&result, 3);
+        assert_config_reports(&sandbox, "PASSED", 0);
+        let stderr = text(&result.stderr);
+        assert!(
+            stderr.contains("could not write HTML report"),
+            "stderr: {stderr}"
+        );
+        assert!(stderr.contains(blocker), "stderr: {stderr}");
+        if blocker == "vault-report-pages" {
+            assert!(!sandbox.path().join("index.html").exists());
+            assert_eq!(fs::read_to_string(blocked).unwrap(), "unrelated file");
+        }
+    }
+}
+
+#[test]
 fn html_json_and_junit_failures_are_independent() {
     let server = HttpServer::start();
     for (format, flag, filename) in [
@@ -597,8 +900,11 @@ fn html_flow_identity_and_masking_preserve_raw_matching() {
         let output = output(&mut command);
         assert_exit(&output, code);
         let mut surfaces = vec![text(&output.stdout), text(&output.stderr)];
-        for filename in ["result.html", "result.json", "result.xml"] {
+        for filename in ["result.html", "result.json", "result.xml", "index.html"] {
             surfaces.push(fs::read_to_string(sandbox.path().join(filename)).unwrap());
+        }
+        for path in html_files(&sandbox.path().join("vault-report-pages")) {
+            surfaces.push(fs::read_to_string(path).unwrap());
         }
         for secret in [
             "cli-secret-sentinel",
@@ -665,6 +971,12 @@ fn html_preserves_transport_error_and_unexecuted_steps() {
     assert!(events
         .iter()
         .any(|event| event["status"] == "NOT_RUN" && event["step_index"] == 1));
+    let detail = html_data(&sandbox.path().join("vault-report-pages/test-001.html"));
+    assert_eq!(detail["run"]["tests"], data["run"]["tests"]);
+    assert_eq!(detail["executions"], data["executions"]);
+    assert!(fs::read_to_string(sandbox.path().join("index.html"))
+        .unwrap()
+        .contains(r#"data-status="ERRORED""#));
 }
 
 #[test]

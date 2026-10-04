@@ -4,6 +4,18 @@
 
 *{box-sizing:border-box}
 body{margin:0}
+a{color:var(--blue);text-underline-offset:3px}
+a:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+.report-navigation{margin:0 0 24px;font-size:14px}
+#report-index{margin-bottom:36px;overflow-x:auto}
+#report-index h2{font-size:23px;letter-spacing:-.45px;margin:0 0 8px}
+.report-index-table{border-collapse:collapse;width:100%;background:var(--surface);font-size:14px}
+.report-index-table th,.report-index-table td{text-align:left;border-bottom:1px solid var(--line);padding:14px 16px}
+.report-index-table th{color:var(--muted);font-size:12px;font-weight:650;background:var(--code)}
+.report-index-table td:first-child{width:60%;overflow-wrap:anywhere}
+.report-index-table td:first-child a{font-weight:650}
+.report-index-table td:nth-child(2),.report-index-table td:last-child{color:var(--muted);font-size:12px}
+.report-index-table td:last-child{font-variant-numeric:tabular-nums}
 button,input,select{font:inherit;color:inherit}
 button,select{cursor:pointer}
 button{border:1px solid var(--line);border-radius:5px;background:var(--surface);padding:7px 12px;line-height:1.35}
