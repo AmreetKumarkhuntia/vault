@@ -3,6 +3,7 @@
   const report = JSON.parse(document.getElementById('vault-report-data').textContent);
   const run = report.run || {};
   const metadata = report.metadata || {};
+  const page = metadata.report_page || {};
   const results = Array.isArray(run.tests) ? run.tests : [];
   const executions = Array.isArray(report.executions) ? report.executions : [];
   const statuses = ['PASSED', 'FAILED', 'ERRORED', 'SKIPPED', 'NOT_RUN'];
@@ -33,15 +34,19 @@
   const counts = tests => Object.fromEntries(statuses.map(status => [status,tests.filter(test => descriptorStatus(test) === status).length]));
   const totals = counts(descriptors);
   const runStatus = descriptors.length ? worst(descriptors) : 'NOT_RUN';
-  byId('run-title').textContent = 'Test run';
+  const pageTitle = string(page.title);
+  const summaryLabel = pageTitle ? (page.kind === 'flow' ? 'Whole flow' : 'Standalone test') : 'Whole run';
+  byId('run-title').textContent = pageTitle || 'Test run';
+  document.querySelector('.summary-caption').textContent = summaryLabel;
+  document.querySelector('.summary').setAttribute('aria-label', `${summaryLabel} totals`);
   byId('run-context').textContent = string(metadata.suite) || 'Vault execution report';
   byId('run-status').replaceWith(Object.assign(badge(runStatus), {id:'run-status'}));
-  document.title = `Vault · ${labels[runStatus]} test report`;
+  document.title = pageTitle ? `Vault · ${pageTitle} · ${labels[runStatus]}` : `Vault · ${labels[runStatus]} test report`;
   const metadataRow = (name,value) => { if (!present(value)) return; const row = node('div'); row.append(node('dt',null,name), node('dd',null,value)); byId('run-metadata').append(row); };
   metadataRow('Environment',run.environment || 'Unknown');
   metadataRow('Started',metadata.started_at);
   metadataRow('Duration',duration(run.duration_ms));
-  metadataRow('Selection',metadata.pattern || 'All tests');
+  metadataRow('Selection',pageTitle || metadata.pattern || 'All tests');
   metadataRow('Tags',array(metadata.tags).join(', '));
   metadataRow('Shuffle seed',metadata.shuffle_seed);
   for (const status of statuses) {
@@ -191,6 +196,7 @@
     const matches=descriptor=>(filter==='ALL'||descriptorStatus(descriptor)===filter)&&(!query||searchable(descriptor).includes(query));
     const visible=descriptors.filter(matches); const visibleCounts=counts(visible);
     byId('filter-summary').textContent=`Showing ${visible.length} of ${descriptors.length} tests · ${statuses.filter(status=>visibleCounts[status]).map(status=>`${visibleCounts[status]} ${labels[status].toLowerCase()}`).join(', ') || 'No matches'}. Summary above shows whole-run totals.`;
+    if (pageTitle) byId('filter-summary').textContent = byId('filter-summary').textContent.replace('whole-run totals', `${summaryLabel.toLowerCase()} totals`);
     const root=byId('results'); root.replaceChildren();
     for (const [key,tests] of groups) {
       const filtered=tests.filter(matches); if (!filtered.length) continue;

@@ -363,7 +363,11 @@ fn write_requested_reports(
 
     if let Some((report, path)) = html {
         match vault_report::write_html(report, &path) {
-            Ok(()) => println!("{} HTML report: {path}", "→".cyan()),
+            Ok(()) => {
+                println!("{} HTML report: {path}", "→".cyan());
+                let index = Path::new(&path).with_file_name("index.html");
+                println!("{} HTML index: {}", "→".cyan(), index.display());
+            }
             Err(error) => failures.push(ReportWriteFailure {
                 format: "HTML",
                 path,

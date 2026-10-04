@@ -1,6 +1,8 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
+mod bundle;
+
 /// A portable report document. All evidence must be sanitized by the caller.
 /// The HTML renderer only bounds previews and escapes data for embedding.
 #[derive(Debug, Serialize)]
@@ -66,13 +68,7 @@ pub fn to_html(report: &HtmlReport) -> String {
 }
 
 pub fn write_html(report: &HtmlReport, path: &str) -> std::io::Result<()> {
-    if let Some(parent) = std::path::Path::new(path)
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, to_html(report))
+    bundle::write(report, std::path::Path::new(path))
 }
 
 fn bound_evidence(value: &mut Value) {
