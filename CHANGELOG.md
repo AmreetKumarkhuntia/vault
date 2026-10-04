@@ -1,3 +1,8 @@
+## v0.7.0 (2026-10-04)
+
+### Features
+- add flow report index and detail pages (b5f8d5f)
+
 ## v0.6.0 (2026-10-03)
 
 ### Features
