@@ -14,8 +14,15 @@ pub struct HtmlReport {
 }
 
 const PREVIEW_LIMIT: usize = 64 * 1024;
+const STYLE: &str = include_str!("html/style.css");
 
+/// Render a standalone document with embedded styles for in-memory callers.
+/// Use `write_html` to generate a bundle with a shared external stylesheet.
 pub fn to_html(report: &HtmlReport) -> String {
+    render(report, &format!("<style>{STYLE}</style>"))
+}
+
+fn render(report: &HtmlReport, style: &str) -> String {
     let mut data = serde_json::to_value(report).expect("JSON report values serialize");
     if let Some(tests) = data.pointer_mut("/run/tests").and_then(Value::as_array_mut) {
         for test in tests {
@@ -62,7 +69,7 @@ pub fn to_html(report: &HtmlReport) -> String {
         .replace('\u{2029}', "\\u2029");
     let document = include_str!("html/document.html");
     document
-        .replace("__VAULT_STYLE__", include_str!("html/style.css"))
+        .replace("__VAULT_STYLE__", style)
         .replace("__VAULT_SCRIPT__", include_str!("html/report.js"))
         .replace("__VAULT_DATA__", &data)
 }

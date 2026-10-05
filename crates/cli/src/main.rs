@@ -50,7 +50,7 @@ enum Command {
         /// Write JUnit XML here (overrides config)
         #[arg(long)]
         junit: Option<String>,
-        /// Write an offline HTML report, sibling index.html and flow pages (overrides config)
+        /// Write an offline HTML bundle with index, flow pages and shared CSS (overrides config)
         #[arg(long)]
         html: Option<String>,
         #[arg(long, short)]

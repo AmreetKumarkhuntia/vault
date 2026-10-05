@@ -37,11 +37,17 @@ is treated as unset. Unicode status glyphs remain unchanged, and JSON/JUnit file
 
 An empty `run` selection exits `2` before connecting to the target, stores, or mock server; `list` remains a successful zero-result inspection. If a requested HTML, JSON, or JUnit report cannot be written, Vault still attempts every other requested report and exits `3`.
 
-Generate a standalone offline report for the current run with
+Generate an offline report bundle for the current run with
 `npx vault --run ./tests/flows --html target/vault-report.html`. It includes clickable flow stages,
 results, lifecycle actions, requests and responses, and failure diffs. Credential fields are
 masked; extend masking with `report.redact` in the suite config. The CLI option overrides
-`report.html` in `vault.yaml`.
+`report.html` in `vault.yaml`. Open `target/index.html` and copy or publish the whole output
+directory, including `vault-report-pages/style.css`, to preserve styling and navigation.
+Every generated HTML page references this shared local stylesheet. Jenkins' default content
+security policy permits same-origin CSS but still blocks the JavaScript required by the
+aggregate and detail pages; download the whole bundle to explore it locally. See the
+[Jenkins publishing instructions](https://github.com/AmreetKumarkhuntia/vault#html-reports) for publishing
+all report files together.
 
 Postgres and Redis are optional. An HTTP-only suite simply omits those stores from `vault.yaml` and does not use their seed or verify blocks.
 
