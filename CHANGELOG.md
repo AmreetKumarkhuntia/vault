@@ -1,3 +1,8 @@
+## v0.7.1 (2026-10-05)
+
+### Fixes
+- publish shared CSS for HTML reports (6310ad8)
+
 ## v0.7.0 (2026-10-04)
 
 ### Features
