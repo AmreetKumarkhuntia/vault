@@ -166,6 +166,7 @@ target/
 ├── index.html                  # Names, statuses and links for this invocation
 ├── vault-report.html           # Full aggregate report at the requested path
 └── vault-report-pages/
+    ├── style.css               # Shared stylesheet for every generated page
     ├── flow-001.html
     ├── flow-002.html
     └── test-003.html            # Selected standalone tests also get a page
@@ -175,18 +176,44 @@ The index follows execution order and includes failed, skipped and unexecuted it
 pages show only that flow or standalone test and link back to the index. File numbers follow
 the selected item order, so repeated stage names remain distinct within their flow.
 
-Each successful invocation replaces the index and Vault-owned detail pages in that directory;
-it does not accumulate separate runs. Use separate output directories to retain multiple run
-bundles. A small ownership file inside `vault-report-pages/` tracks generated filenames for
-cleanup, not report history. Unrelated files are preserved, and conflicting unowned index or
-detail files cause a report-write error. If `--html` names `index.html` itself, that file contains
-both the flow links and the full aggregate report.
+Each successful invocation replaces the index and Vault-owned detail pages and stylesheet in
+that directory; it does not accumulate separate runs. Use separate output directories to retain
+multiple run bundles. A small ownership file inside `vault-report-pages/` tracks generated
+filenames for cleanup, not report history. Unrelated files are preserved, and conflicting unowned
+index, detail, or stylesheet files cause a report-write error. If `--html` names `index.html`
+itself, that file contains both the flow links and the full aggregate report.
 
-Copy the whole directory to share the index and its relative links. The aggregate report is
-also a standalone offline HTML file; no external scripts, fonts, or services are needed.
+Copy or publish the whole directory, including `vault-report-pages/style.css`, to keep every
+page styled and its relative links working. The bundle works offline; no external scripts,
+fonts, or services are needed. The Rust `vault_report::to_html()` API still returns a standalone
+HTML document with embedded CSS for callers that need a single file.
 Search and status filters narrow the visible tests while totals remain visible; flow stages
 link to their test details. Failed tests expand automatically, and light/dark themes and print
 styles are included. JSON and JUnit retain their configured paths and aggregate formats.
+
+For Jenkins, generate into a dedicated directory (for example,
+`vault run --html target/vault-reports/report.html`) and publish the entire bundle with the
+[HTML Publisher plugin](https://www.jenkins.io/doc/pipeline/steps/htmlpublisher/):
+
+```groovy
+publishHTML(target: [
+    reportDir: 'target/vault-reports',
+    reportFiles: 'index.html',
+    reportName: 'Vault reports',
+    includes: '**/*',
+    keepAll: true,
+    alwaysLinkToLastBuild: true,
+    allowMissing: false
+])
+```
+
+Put this step in `post { always { ... } }` to publish reports even when tests fail. The shared
+stylesheet supports Jenkins' default policy for CSS served from the same origin. Jenkins'
+[default content security policy](https://www.jenkins.io/doc/book/security/configuring-content-security-policy/)
+still blocks JavaScript, which the aggregate and detail pages need to display results and
+interactive controls. The separate index table remains readable. To explore the complete report,
+download the whole bundle and open it locally, or use an administrator-configured
+[Resource Root URL](https://www.jenkins.io/doc/book/security/user-content/).
 
 When HTML is requested, Vault records the actual lifecycle: setup, store resets and seeds,
 watch snapshots, mock setup, prepared HTTP requests and responses, retries, captures, verification

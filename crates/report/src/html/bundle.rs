@@ -3,7 +3,7 @@
 //! Input is already sanitized. The ownership file records only generated paths,
 //! never report history or evidence, so reruns can safely remove obsolete pages.
 
-use super::{to_html, HtmlReport};
+use super::{render, HtmlReport, STYLE};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const DIRECTORY: &str = "vault-report-pages";
+const STYLESHEET: &str = "style.css";
 const OWNERSHIP: &str = ".vault-report-pages.json";
 const INDEX_MARKER: &str = "<!-- vault-report-index:v1 -->";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -33,9 +34,31 @@ pub(super) fn write(report: &HtmlReport, path: &Path) -> io::Result<()> {
     let index_path = parent.join("index.html");
     let mut combined =
         path.file_name().is_some_and(|name| name == "index.html") || aliases(path, &index_path);
+
+    // Every disk report depends on this stylesheet. Publish it before any HTML,
+    // retaining ownership of earlier pages if a later ancillary write fails.
+    let directory = parent.join(DIRECTORY);
+    let mut previous = owned_files(&directory)?;
+    let stylesheet_path = directory.join(STYLESHEET);
+    regular_file_or_absent(&stylesheet_path)?;
+    if stylesheet_path.exists() && !previous.contains(STYLESHEET) {
+        return Err(invalid(
+            &stylesheet_path,
+            "refusing to replace an unowned report stylesheet",
+        ));
+    }
+    at(&directory, fs::create_dir_all(&directory))?;
+    previous.insert(STYLESHEET.to_owned());
+    write_ownership(&directory, &previous)?;
+    atomic_write(&stylesheet_path, STYLE)?;
+
+    let root_stylesheet = format!("{DIRECTORY}/{STYLESHEET}");
     // The requested aggregate remains useful even if an ancillary output fails.
     if !combined {
-        atomic_write(path, &with_navigation(report, "index.html"))?;
+        atomic_write(
+            path,
+            &with_navigation(report, "index.html", &root_stylesheet),
+        )?;
         // On a case-insensitive filesystem, INDEX.html may be the very same
         // requested output as index.html. Keep the canonical landing-page link.
         combined = aliases(path, &index_path);
@@ -56,10 +79,12 @@ pub(super) fn write(report: &HtmlReport, path: &Path) -> io::Result<()> {
             }
         }
     }
-    let directory = parent.join(DIRECTORY);
-    let previous = owned_files(&directory)?;
     let pages = item_pages(report);
-    let current: BTreeSet<String> = pages.iter().map(|page| page.filename.clone()).collect();
+    let current: BTreeSet<String> = pages
+        .iter()
+        .map(|page| page.filename.clone())
+        .chain(std::iter::once(STYLESHEET.to_owned()))
+        .collect();
     for name in &current {
         let page = directory.join(name);
         regular_file_or_absent(&page)?;
@@ -70,17 +95,20 @@ pub(super) fn write(report: &HtmlReport, path: &Path) -> io::Result<()> {
 
     // Record ownership before publishing pages so a failed write remains
     // recoverable on the next invocation. Obsolete files stay owned until removed.
-    at(&directory, fs::create_dir_all(&directory))?;
     let pending: BTreeSet<String> = previous.union(&current).cloned().collect();
     write_ownership(&directory, &pending)?;
     for page in &pages {
-        let html = with_navigation(&page.report, "../index.html");
+        let html = with_navigation(&page.report, "../index.html", STYLESHEET);
         atomic_write(&directory.join(&page.filename), &html)?;
     }
 
     let listing = index_listing(&pages);
     if combined {
-        let html = to_html(report).replacen("<main>", &format!("<main>\n{listing}"), 1);
+        let html = render(report, &stylesheet_link(&root_stylesheet)).replacen(
+            "<main>",
+            &format!("<main>\n{listing}"),
+            1,
+        );
         // Use the canonical spelling on case-insensitive filesystems as well,
         // so copying the directory to a case-sensitive filesystem keeps links valid.
         atomic_write(&index_path, &mark_index(html))?;
@@ -306,16 +334,20 @@ fn index_listing(pages: &[ItemPage]) -> String {
     html
 }
 
-fn with_navigation(report: &HtmlReport, href: &str) -> String {
+fn stylesheet_link(href: &str) -> String {
+    format!("<link rel=\"stylesheet\" href=\"{}\">", escape(href))
+}
+
+fn with_navigation(report: &HtmlReport, href: &str, stylesheet: &str) -> String {
     let navigation = format!("<main>\n<nav class=\"report-navigation\" aria-label=\"Reports\"><a href=\"{}\">All flows and tests</a></nav>", escape(href));
-    to_html(report).replacen("<main>", &navigation, 1)
+    render(report, &stylesheet_link(stylesheet)).replacen("<main>", &navigation, 1)
 }
 
 fn index_document(listing: &str, aggregate: &str) -> String {
-    let style = include_str!("style.css");
+    let style = stylesheet_link(&format!("{DIRECTORY}/{STYLESHEET}"));
     mark_index(format!(
         r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Vault · Report index</title><style>{style}</style></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Vault · Report index</title>{style}</head>
 <body><header class="masthead"><div class="brand"><span class="brand-mark" aria-hidden="true">V</span><span>vault <span class="brand-sub">/ report index</span></span></div><div class="header-actions"><span class="offline-label">Offline report</span><button id="theme-toggle" type="button" aria-label="Switch color theme">Dark theme</button></div></header><main><section class="run-intro"><div><h1>Test run reports</h1><p class="run-context">Open a flow or standalone test to inspect its execution.</p></div></section><nav class="report-navigation"><a href="{aggregate}">Full run report</a></nav>{listing}<footer>Generated by Vault<span>Keep this directory together to share the reports offline.</span></footer></main>
 <script>(()=>{{const root=document.documentElement;const button=document.getElementById('theme-toggle');function theme(dark){{root.dataset.theme=dark?'dark':'light';button.textContent=dark?'Light theme':'Dark theme';button.setAttribute('aria-label',dark?'Switch to light theme':'Switch to dark theme');}}theme(matchMedia('(prefers-color-scheme: dark)').matches);button.addEventListener('click',()=>theme(root.dataset.theme!=='dark'));}})();</script></body></html>"#
     ))
@@ -386,13 +418,14 @@ fn owned_files(directory: &Path) -> io::Result<BTreeSet<String>> {
             let name = name
                 .as_str()
                 .ok_or_else(|| invalid(&marker, "invalid generated filename"))?;
-            let valid = name
-                .strip_prefix("flow-")
-                .or_else(|| name.strip_prefix("test-"))
-                .and_then(|name| name.strip_suffix(".html"))
-                .is_some_and(|number| {
-                    number.len() >= 3 && number.bytes().all(|byte| byte.is_ascii_digit())
-                });
+            let valid = name == STYLESHEET
+                || name
+                    .strip_prefix("flow-")
+                    .or_else(|| name.strip_prefix("test-"))
+                    .and_then(|name| name.strip_suffix(".html"))
+                    .is_some_and(|number| {
+                        number.len() >= 3 && number.bytes().all(|byte| byte.is_ascii_digit())
+                    });
             if !valid {
                 return Err(invalid(&marker, "invalid generated filename"));
             }

@@ -302,13 +302,38 @@ fn html_files(directory: &Path) -> Vec<PathBuf> {
 }
 
 fn assert_offline_html_links(directory: &Path) {
+    let stylesheet = directory.join("vault-report-pages/style.css");
+    assert!(stylesheet.is_file(), "shared stylesheet should exist");
+    assert!(
+        !fs::read_to_string(&stylesheet).unwrap().is_empty(),
+        "shared stylesheet should contain CSS"
+    );
     for path in html_files(directory) {
         let html = fs::read_to_string(&path).unwrap();
         assert!(
             !html.contains("<script src="),
             "external script in {path:?}"
         );
-        assert!(!html.contains("<link "), "external stylesheet in {path:?}");
+        if html.contains("id=\"vault-report-data\"")
+            || html.contains("<!-- vault-report-index:v1 -->")
+        {
+            assert!(!html.contains("<style"), "inline stylesheet in {path:?}");
+            assert!(!html.contains(" style="), "inline style in {path:?}");
+            assert_eq!(
+                html.matches("<link rel=\"stylesheet\"").count(),
+                1,
+                "expected one stylesheet reference in {path:?}"
+            );
+            let href = if path.parent() == Some(directory) {
+                "vault-report-pages/style.css"
+            } else {
+                "style.css"
+            };
+            assert!(
+                html.contains(&format!("<link rel=\"stylesheet\" href=\"{href}\"")),
+                "wrong stylesheet reference in {path:?}"
+            );
+        }
         for link in html.split("href=\"").skip(1) {
             let href = link.split('"').next().unwrap();
             if href.starts_with('#') {
@@ -832,6 +857,30 @@ fn html_bundle_write_failure_preserves_independent_exports() {
             assert_eq!(fs::read_to_string(blocked).unwrap(), "unrelated file");
         }
     }
+}
+
+#[test]
+fn html_stylesheet_write_failure_preserves_independent_exports() {
+    let sandbox = TempDir::new("html-stylesheet-error");
+    let server = HttpServer::start();
+    let mut command = configured_run(&sandbox, &server, "report pass");
+    assert_exit(&output(&mut command), 0);
+    let index = fs::read_to_string(sandbox.path().join("index.html")).unwrap();
+    let stylesheet = sandbox.path().join("vault-report-pages/style.css");
+    fs::remove_file(&stylesheet).unwrap();
+    fs::create_dir(&stylesheet).unwrap();
+
+    let result = output(&mut command);
+    assert_exit(&result, 3);
+    assert_config_reports(&sandbox, "PASSED", 0);
+    let stderr = text(&result.stderr);
+    assert!(stderr.contains("could not write HTML report"), "{stderr}");
+    assert!(stderr.contains("style.css"), "{stderr}");
+    assert!(stylesheet.is_dir(), "the blocking directory is preserved");
+    assert_eq!(
+        fs::read_to_string(sandbox.path().join("index.html")).unwrap(),
+        index
+    );
 }
 
 #[test]

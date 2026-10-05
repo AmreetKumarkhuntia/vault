@@ -702,7 +702,7 @@ testkit run [PATTERN]              # all tests, or glob over suite/test names: '
     --shuffle [--seed N] # order-independence audit
     --report <path>      JSON report (also settable in config)
     --junit <path>       JUnit XML for CI
-    --html <path>        Offline aggregate report plus sibling index.html and flow pages
+    --html <path>        Offline HTML bundle with index, flow pages and shared CSS
     --keep-state-on-failure[=bool]   # default on locally, off in CI profiles
     --quiet | -v | -vv   # dots | steps expanded | wire logs
 testkit list [PATTERN] [--tag t]   # resolved RunPlan, no execution (shares filter code with run)
@@ -732,6 +732,14 @@ priority over `CLICOLOR_FORCE`; glyphs and UTF-8 table borders are preserved.
 `run` resolves its filtered plan after static validation but before creating the async runtime or touching stores, mocks, and the target. If no test or flow matches, it names the requested pattern and tags, writes no reports, and exits `2`. `list` deliberately keeps inspection semantics for the same filter: it prints `0 flows, 0 standalone tests` and exits `0`.
 
 **Reports:** pretty terminal tree per test (steps ✓/✗, then verify groups, near-miss tables, one line per passing test); JSON v1 with test duration, final HTTP results, structured findings, and failure recordings; optional JUnit XML and offline HTML. HTML uses a companion execution model for actual lifecycle timings, every HTTP attempt, capture provenance, successful verification polling, all observed mock calls, flow-stage identities, and work that did not run. Existing result types and JSON v1 shape remain unchanged. Private credential discovery runs even without detailed HTML tracing; configured masking applies to all generated report copies after matching. All requested HTML/JSON/JUnit writes are attempted independently. Any write failure makes the command exit `3`, while successfully written sibling reports remain available.
+
+Disk HTML output is a portable bundle: the aggregate, index, and detail pages reference one
+local `vault-report-pages/style.css`. Copy or publish the entire output directory. The public
+`vault_report::to_html()` string renderer retains embedded CSS for standalone use. The shared
+stylesheet avoids inline CSS restrictions in Jenkins, but aggregate/detail rendering still
+requires JavaScript; Jenkins' default content security policy blocks it. The separate index
+table is rendered directly in HTML. See the [HTML report instructions](../README.md#html-reports)
+for Jenkins publishing and viewing options.
 
 ---
 

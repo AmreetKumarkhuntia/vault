@@ -58,6 +58,9 @@ fn embeds_statuses_order_and_repeated_test_identity() {
     assert!(!html.contains("__VAULT_"));
     assert!(!html.contains("fetch("));
     assert!(!html.contains("https://"));
+    assert!(html.contains("<style>"));
+    assert!(html.contains(":root{color-scheme:"));
+    assert!(!html.contains("rel=\"stylesheet\""));
 }
 
 #[test]
@@ -217,7 +220,7 @@ fn bounds_captured_values_and_stage_inputs_without_losing_execution_identity() {
 }
 
 #[test]
-fn writes_a_self_contained_report_and_creates_parent_directories() {
+fn writes_a_report_with_external_stylesheet_and_creates_parent_directories() {
     let root = std::env::temp_dir().join(format!(
         "vault-html-write-{}-{}",
         std::process::id(),
@@ -231,5 +234,10 @@ fn writes_a_self_contained_report_and_creates_parent_directories() {
     let html = std::fs::read_to_string(&path).unwrap();
     assert!(html.starts_with("<!doctype html>"));
     assert_eq!(embedded_data(&html)["schema_version"], 2);
+    assert!(html.contains("<link rel=\"stylesheet\" href=\"vault-report-pages/style.css\">"));
+    assert!(!html.contains("<style"));
+    let css = std::fs::read_to_string(root.join("nested/vault-report-pages/style.css")).unwrap();
+    assert!(css.contains(":root{color-scheme:"));
+    assert!(css.contains(".report-index-table"));
     std::fs::remove_dir_all(root).unwrap();
 }

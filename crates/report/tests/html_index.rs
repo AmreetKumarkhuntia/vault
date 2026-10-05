@@ -133,6 +133,29 @@ fn html_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn assert_external_stylesheet(html: &str, href: &str) {
+    assert!(
+        html.contains(&format!("<link rel=\"stylesheet\" href=\"{href}\">")),
+        "missing external stylesheet {href}"
+    );
+    assert_eq!(html.matches("rel=\"stylesheet\"").count(), 1);
+    assert!(!Regex::new(r"(?i)<style\b|\sstyle\s*=")
+        .unwrap()
+        .is_match(html));
+}
+
+fn published_outputs(directory: &TempDirectory) -> Vec<(&'static str, String)> {
+    [
+        "report.html",
+        "index.html",
+        "vault-report-pages/flow-001.html",
+        "vault-report-pages/.vault-report-pages.json",
+    ]
+    .into_iter()
+    .map(|name| (name, directory.read(name)))
+    .collect()
+}
+
 #[test]
 fn one_invocation_lists_five_flows_and_standalone_in_execution_order() {
     let directory = TempDirectory::new();
@@ -160,6 +183,18 @@ fn one_invocation_lists_five_flows_and_standalone_in_execution_order() {
     assert_eq!(aggregate["metadata"]["tests"], report.metadata["tests"]);
     assert_eq!(aggregate["executions"], json!(report.executions));
     assert!(!directory.path().join(".vault-report-index.json").exists());
+    for page in html_files(directory.path()) {
+        let href = if page.parent() == Some(directory.path()) {
+            "vault-report-pages/style.css"
+        } else {
+            "style.css"
+        };
+        assert_external_stylesheet(&std::fs::read_to_string(page).unwrap(), href);
+    }
+    let css = directory.read("vault-report-pages/style.css");
+    assert!(css.contains(":root{color-scheme:"));
+    assert!(css.contains(".report-index-table"));
+    assert!(css.contains(".masthead"));
 }
 
 #[test]
@@ -265,7 +300,8 @@ fn rerun_replaces_entries_and_removes_only_previously_generated_pages() {
     assert_eq!(directory.read("keep.txt"), "keep me");
     let ownership: Value =
         serde_json::from_str(&directory.read(&format!("{PAGES}/{OWNERSHIP}"))).unwrap();
-    assert_eq!(ownership["files"], json!(["flow-001.html"]));
+    assert_eq!(ownership["files"], json!(["flow-001.html", "style.css"]));
+    assert!(directory.path().join(PAGES).join("style.css").is_file());
 }
 
 #[test]
@@ -308,7 +344,12 @@ fn custom_paths_and_hostile_labels_remain_portable_after_moving_the_bundle() {
         assert!(!html.contains(original.to_str().unwrap()));
         assert!(!html.contains("fetch("));
         assert!(!html.contains("<script src="));
-        assert!(!html.contains("<link "));
+        let stylesheet = if page.parent() == Some(relocated.as_path()) {
+            "vault-report-pages/style.css"
+        } else {
+            "style.css"
+        };
+        assert_external_stylesheet(&html, stylesheet);
         for capture in link.captures_iter(&html) {
             let target = url::Url::from_file_path(&page)
                 .unwrap()
@@ -338,6 +379,7 @@ fn explicit_index_html_combines_navigation_and_aggregate_without_duplicate_entri
     write(directory.path(), "index.html", &report);
     let index = directory.read("index.html");
     assert_eq!(index_rows(&index).len(), 6);
+    assert_external_stylesheet(&index, "vault-report-pages/style.css");
     assert_eq!(embedded_data(&index)["run"], report.run);
     assert!(index.contains("vault-report-pages/flow-005.html"));
     assert!(index.contains("vault-report-pages/test-006.html"));
@@ -348,6 +390,7 @@ fn explicit_index_html_combines_navigation_and_aggregate_without_duplicate_entri
     );
     let index = directory.read("index.html");
     assert_eq!(index_rows(&index).len(), 1);
+    assert_external_stylesheet(&index, "vault-report-pages/style.css");
     assert_eq!(embedded_data(&index)["run"]["tests"][0]["status"], "FAILED");
     assert!(!index.contains("merchant flow"));
 }
@@ -401,6 +444,11 @@ fn unrelated_index_or_unowned_generated_directory_is_not_overwritten() {
     .unwrap_err();
     assert!(error.to_string().contains("index.html"));
     assert_eq!(directory.read("index.html"), "existing homepage");
+    assert_external_stylesheet(
+        &directory.read("report.html"),
+        "vault-report-pages/style.css",
+    );
+    assert!(directory.path().join(PAGES).join("style.css").is_file());
 
     let directory = TempDirectory::new();
     std::fs::create_dir(directory.path().join(PAGES)).unwrap();
@@ -440,6 +488,11 @@ fn detail_write_failure_preserves_the_previously_published_index() {
     assert!(error.to_string().contains("flow-002.html"), "{error}");
     assert_eq!(directory.read("index.html"), index);
     assert!(blocked.is_dir());
+    assert_external_stylesheet(
+        &directory.read("report.html"),
+        "vault-report-pages/style.css",
+    );
+    assert!(directory.path().join(PAGES).join("style.css").is_file());
 }
 
 #[test]
@@ -447,6 +500,7 @@ fn malformed_ownership_marker_does_not_trigger_cleanup_or_replace_index() {
     let directory = TempDirectory::new();
     write(directory.path(), "report.html", &suite_report());
     let old_index = directory.read("index.html");
+    let old_report = directory.read("report.html");
     std::fs::write(directory.path().join(PAGES).join(OWNERSHIP), "{").unwrap();
     assert!(write_html(
         &one_flow("replacement", "PASSED"),
@@ -454,6 +508,7 @@ fn malformed_ownership_marker_does_not_trigger_cleanup_or_replace_index() {
     )
     .is_err());
     assert_eq!(directory.read("index.html"), old_index);
+    assert_eq!(directory.read("report.html"), old_report);
     assert!(directory.path().join(PAGES).join("flow-005.html").is_file());
     assert_eq!(directory.read(&format!("{PAGES}/{OWNERSHIP}")), "{");
 }
@@ -462,6 +517,7 @@ fn malformed_ownership_marker_does_not_trigger_cleanup_or_replace_index() {
 fn empty_invocation_clears_previous_entries_and_generated_pages() {
     let directory = TempDirectory::new();
     write(directory.path(), "report.html", &suite_report());
+    let css = directory.read("vault-report-pages/style.css");
     let empty = HtmlReport {
         schema_version: 1,
         run: json!({"tests":[], "duration_ms":0}),
@@ -472,6 +528,18 @@ fn empty_invocation_clears_previous_entries_and_generated_pages() {
     assert!(index_rows(&directory.read("index.html")).is_empty());
     assert!(!directory.read("index.html").contains("merchant flow"));
     assert!(html_files(&directory.path().join(PAGES)).is_empty());
+    assert_eq!(directory.read("vault-report-pages/style.css"), css);
+    let ownership: Value =
+        serde_json::from_str(&directory.read(&format!("{PAGES}/{OWNERSHIP}"))).unwrap();
+    assert_eq!(ownership["files"], json!(["style.css"]));
+    assert_external_stylesheet(
+        &directory.read("index.html"),
+        "vault-report-pages/style.css",
+    );
+    assert_external_stylesheet(
+        &directory.read("report.html"),
+        "vault-report-pages/style.css",
+    );
     assert_eq!(
         embedded_data(&directory.read("report.html"))["run"]["tests"],
         json!([])
@@ -479,10 +547,188 @@ fn empty_invocation_clears_previous_entries_and_generated_pages() {
 }
 
 #[test]
+fn old_page_only_ownership_upgrades_without_removing_unrelated_stylesheets() {
+    let directory = TempDirectory::new();
+    let pages = directory.path().join(PAGES);
+    std::fs::create_dir(&pages).unwrap();
+    std::fs::write(
+        pages.join(OWNERSHIP),
+        serde_json::to_vec(&json!({
+            "schema_version":1, "files":["flow-001.html", "flow-002.html"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(pages.join("flow-001.html"), "old first page").unwrap();
+    std::fs::write(pages.join("flow-002.html"), "old second page").unwrap();
+    std::fs::write(pages.join("custom.css"), "/* unrelated stylesheet */").unwrap();
+    std::fs::write(
+        directory.path().join("index.html"),
+        "<!doctype html><!-- vault-report-index:v1 --><p>old index</p>",
+    )
+    .unwrap();
+
+    write(
+        directory.path(),
+        "report.html",
+        &one_flow("updated", "PASSED"),
+    );
+
+    assert!(pages.join("style.css").is_file());
+    assert!(!pages.join("flow-002.html").exists());
+    assert_eq!(
+        directory.read("vault-report-pages/custom.css"),
+        "/* unrelated stylesheet */"
+    );
+    let ownership: Value =
+        serde_json::from_str(&directory.read(&format!("{PAGES}/{OWNERSHIP}"))).unwrap();
+    assert_eq!(ownership["schema_version"], 1);
+    assert_eq!(ownership["files"], json!(["flow-001.html", "style.css"]));
+    assert_external_stylesheet(
+        &directory.read("report.html"),
+        "vault-report-pages/style.css",
+    );
+    assert_external_stylesheet(
+        &directory.read("index.html"),
+        "vault-report-pages/style.css",
+    );
+    assert_external_stylesheet(
+        &directory.read("vault-report-pages/flow-001.html"),
+        "style.css",
+    );
+}
+
+#[test]
+fn ownership_does_not_accept_arbitrary_css_for_cleanup() {
+    let directory = TempDirectory::new();
+    write(
+        directory.path(),
+        "report.html",
+        &one_flow("previous", "PASSED"),
+    );
+    std::fs::write(directory.path().join(PAGES).join("custom.css"), "keep me").unwrap();
+    std::fs::write(
+        directory.path().join(PAGES).join(OWNERSHIP),
+        serde_json::to_vec(&json!({
+            "schema_version":1, "files":["flow-001.html", "style.css", "custom.css"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let before = published_outputs(&directory);
+    let css = directory.read("vault-report-pages/style.css");
+    assert!(write_html(
+        &one_flow("replacement", "FAILED"),
+        directory.path().join("report.html").to_str().unwrap()
+    )
+    .is_err());
+    assert_eq!(published_outputs(&directory), before);
+    assert_eq!(directory.read("vault-report-pages/style.css"), css);
+    assert_eq!(directory.read("vault-report-pages/custom.css"), "keep me");
+}
+
+#[test]
+fn unowned_stylesheet_collision_preserves_existing_outputs() {
+    let directory = TempDirectory::new();
+    write(
+        directory.path(),
+        "report.html",
+        &one_flow("previous", "PASSED"),
+    );
+    std::fs::write(
+        directory.path().join(PAGES).join(OWNERSHIP),
+        serde_json::to_vec(&json!({"schema_version":1, "files":["flow-001.html"]})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join(PAGES).join("style.css"),
+        "unowned CSS",
+    )
+    .unwrap();
+    let before = published_outputs(&directory);
+    let error = write_html(
+        &one_flow("replacement", "FAILED"),
+        directory.path().join("report.html").to_str().unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("style.css"), "{error}");
+    assert_eq!(published_outputs(&directory), before);
+    assert_eq!(
+        directory.read("vault-report-pages/style.css"),
+        "unowned CSS"
+    );
+}
+
+#[test]
+fn stylesheet_write_failure_preserves_existing_outputs() {
+    let directory = TempDirectory::new();
+    write(
+        directory.path(),
+        "report.html",
+        &one_flow("previous", "PASSED"),
+    );
+    let stylesheet = directory.path().join(PAGES).join("style.css");
+    std::fs::remove_file(&stylesheet).unwrap();
+    std::fs::create_dir(&stylesheet).unwrap();
+    std::fs::write(stylesheet.join("keep.txt"), "directory content").unwrap();
+    let before = published_outputs(&directory);
+    let error = write_html(
+        &one_flow("replacement", "FAILED"),
+        directory.path().join("report.html").to_str().unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("style.css"), "{error}");
+    assert_eq!(published_outputs(&directory), before);
+    assert_eq!(
+        std::fs::read_to_string(stylesheet.join("keep.txt")).unwrap(),
+        "directory content"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stylesheet_symlink_preserves_existing_outputs_and_external_target() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDirectory::new();
+    let outside = TempDirectory::new();
+    write(
+        directory.path(),
+        "report.html",
+        &one_flow("previous", "PASSED"),
+    );
+    std::fs::write(outside.path().join("style.css"), "external CSS").unwrap();
+    let stylesheet = directory.path().join(PAGES).join("style.css");
+    std::fs::remove_file(&stylesheet).unwrap();
+    symlink(outside.path().join("style.css"), &stylesheet).unwrap();
+    let before = published_outputs(&directory);
+    let error = write_html(
+        &one_flow("replacement", "FAILED"),
+        directory.path().join("report.html").to_str().unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("style.css"), "{error}");
+    assert_eq!(published_outputs(&directory), before);
+    assert_eq!(outside.read("style.css"), "external CSS");
+    assert!(std::fs::symlink_metadata(stylesheet)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
 fn uppercase_index_filename_preserves_aggregate_on_case_insensitive_filesystems() {
     let directory = TempDirectory::new();
     let report = suite_report();
     write(directory.path(), "INDEX.HTML", &report);
+    assert_external_stylesheet(
+        &directory.read("INDEX.HTML"),
+        "vault-report-pages/style.css",
+    );
+    assert_external_stylesheet(
+        &directory.read("index.html"),
+        "vault-report-pages/style.css",
+    );
     assert_eq!(
         embedded_data(&directory.read("INDEX.HTML"))["run"],
         report.run
@@ -498,6 +744,14 @@ fn uppercase_index_filename_preserves_aggregate_on_case_insensitive_filesystems(
         "FAILED"
     );
     assert_eq!(index_rows(&directory.read("index.html")).len(), 1);
+    assert_external_stylesheet(
+        &directory.read("INDEX.HTML"),
+        "vault-report-pages/style.css",
+    );
+    assert_external_stylesheet(
+        &directory.read("index.html"),
+        "vault-report-pages/style.css",
+    );
 }
 
 #[test]
