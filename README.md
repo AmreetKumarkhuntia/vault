@@ -88,6 +88,7 @@ vault run 'create order*'  # one test by name/glob
 vault run -t smoke         # filter by tag
 vault run --step           # pause at each lifecycle boundary: resp / vars / calls / db <sql> / redis <cmd>
 vault run --shuffle        # order-independence audit
+vault run --parallel 4     # up to 4 flows/standalone tests at once (see "Parallel runs")
 ```
 
 The npm-friendly shorthand accepts either the suite directory or its root config file, and forwards additional run options:
@@ -413,13 +414,43 @@ docs/DESIGN.md     full design document
 
 `vault run` reads `tests/flows` by default (`--suite-dir` overrides). `vault --run <path>` is a shorthand for the same command and also accepts the path to `vault.yaml`. The store layer is a trait boundary: adding MySQL or Mongo later is a new driver crate plus one registration line in the CLI — the engine never learns store specifics, because seed/verify blocks are driver-owned documents.
 
+## Parallel runs
+
+`vault run --parallel N` runs up to N items at once, capped at the number of selected items. An
+item is one flow, whose stages stay sequential, or one standalone test. Items start in plan order,
+or shuffle order with `--shuffle`. Reports list results in that same order whatever finishes first.
+
+Above 1 lane, isolation moves from each test to the whole run:
+
+- Every store is reset and the suite-global `seed` is applied once, before the first item.
+- Items never reset. `reset: once`, `reset: each`, and standalone resets are skipped, and each
+  test applies only its local `seed` on top of the shared baseline.
+- Tests that declare `mocks`, `verify.calls`, or `watch` run alone. The target reaches one fixed
+  mock URL, so lanes cannot tell their outbound calls apart, and `watch` diffs whole tables. Other
+  lanes wait while such a test runs.
+- `--step` requires serial execution and is rejected with `--parallel` above 1.
+
+The global seed renders once for the whole run, not once per test:
+
+- Its templates see `env` and builtins only. `vars.*` renders empty, `test.name` renders as
+  `<baseline>`, and `mock.*` URLs fail the run.
+- `now()` is frozen when the run starts, so `!near-now` checks on globally seeded rows can go stale
+  in a long run.
+- A reset or global seed failure stops the run with exit code 3 before any test runs, and no reports
+  are written. Serially, the same failure errors one test and reports are still written.
+- Stores are reset even when every selected test is skipped.
+
+Tests must be written to share the baseline. Use unique keys in local seeds and requests.
+Avoid `count: exact` and `expect_absent` on rows that another lane can write.
+`--parallel 1`, the default, keeps the per-test reset behavior described above.
+
 ## Notes & limitations (v1)
 
 The prioritized, evidence-backed backlog is tracked in
 [`docs/SHORTCOMINGS.md`](docs/SHORTCOMINGS.md). It separates Vault limitations from adopter-specific
 CI, coverage, and application behavior.
 
-- Execution is serial by design: one target, one database. The session abstractions reserve hooks for parallel lanes.
+- Execution is serial by default: one target, one database. `--parallel N` opts into lanes; see [Parallel runs](#parallel-runs).
 - Transaction-rollback isolation is impossible for a black-box target (it owns its own connections) — that's why isolation is TRUNCATE-based and documented as such.
 - When enabled, Redis verification requires a dedicated logical DB (e.g. `/15`); the driver refuses db 0 without `allow_db0: true`.
 - The target's in-process caches don't reset with the DB; if your server has a reset endpoint, call it via a seed `sql:`-style hook or an extra step.

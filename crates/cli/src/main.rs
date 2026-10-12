@@ -44,6 +44,9 @@ enum Command {
         shuffle: bool,
         #[arg(long)]
         seed: Option<u64>,
+        /// Run up to N flows/standalone tests at once; above 1, stores reset and the global seed applies once per run
+        #[arg(long, default_value_t = 1, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        parallel: usize,
         /// Write the JSON report here (overrides config)
         #[arg(long)]
         report: Option<String>,
@@ -113,6 +116,7 @@ fn main() {
             step,
             shuffle,
             seed,
+            parallel,
             report,
             junit,
             html,
@@ -125,6 +129,7 @@ fn main() {
             step,
             shuffle,
             seed,
+            parallel,
             report,
             junit,
             html,

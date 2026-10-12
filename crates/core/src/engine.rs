@@ -57,9 +57,42 @@ pub struct TestRunner {
     pub mock: Arc<MockServer>,
     pub gate: Arc<dyn Gate>,
     pub abort_run: std::sync::atomic::AtomicBool,
+    /// Set for parallel lanes: [`Self::apply_baseline`] already reset every
+    /// store and applied the global seed, so lifecycles only add local seed.
+    pub shared_baseline: bool,
+    /// The mock listener holds one active session and `watch` diffs whole
+    /// tables, so tests that arm mocks, verify calls, or watch take the write
+    /// side; every other test takes a read.
+    pub exclusive: tokio::sync::RwLock<()>,
 }
 
 impl TestRunner {
+    /// Run-level isolation boundary for parallel lanes. Global seed templates
+    /// see only `env` and builtins here, never test vars.
+    pub async fn apply_baseline(&self) -> Result<(), CoreError> {
+        for (kind, store) in &self.stores {
+            let spec = self
+                .defaults
+                .reset
+                .get(kind)
+                .cloned()
+                .unwrap_or(Value::Null);
+            store.reset(&spec).await?;
+        }
+        let engine = TemplateEngine::new(
+            json!({
+                "vars": {}, "steps": {}, "mock": {}, "flow": {},
+                "env": std::env::vars().map(|(k, v)| (k, Value::String(v))).collect::<Map<String, Value>>(),
+                "test": {"name": "<baseline>"},
+            }),
+            now_ms(),
+        );
+        for (kind, doc) in &self.global_seed {
+            self.store(kind)?.seed(&engine.render_value(doc)?).await?;
+        }
+        Ok(())
+    }
+
     pub async fn run_test(
         &self,
         def: &TestDef,
@@ -124,8 +157,9 @@ impl TestRunner {
         collect_evidence: bool,
         collect_sources: bool,
     ) -> TrackedTestResult {
-        let mut evidence = ExecutionCollector::with_sources(collect_evidence, collect_sources);
+        let do_reset = do_reset && !self.shared_baseline;
         if let Some(reason) = def.skip.reason() {
+            let mut evidence = ExecutionCollector::with_sources(collect_evidence, collect_sources);
             let result = TestResult::skipped(&def.test, reason.clone());
             let event = evidence.start("test", &def.test, None, 0, json!({"reason": reason}));
             evidence.complete(event, ExecutionStatus::Skipped);
@@ -137,6 +171,14 @@ impl TestRunner {
                 execution: evidence.execution,
             };
         }
+        // Taken before the clocks start so queueing never counts as test time.
+        let (_exclusive, _shared) =
+            if !def.mocks.is_empty() || !def.verify.calls.is_empty() || !def.watch.is_empty() {
+                (Some(self.exclusive.write().await), None)
+            } else {
+                (None, Some(self.exclusive.read().await))
+            };
+        let mut evidence = ExecutionCollector::with_sources(collect_evidence, collect_sources);
         let started = Instant::now();
         let mut initialization = InitializationProgress::default();
         let mut result = TestResult {
@@ -857,7 +899,8 @@ impl TestRunner {
         let mut isolation_invalid = false;
 
         for (stage_index, stage) in flow.stages.iter().enumerate() {
-            let do_reset = flow.reset == FlowReset::Each || reset_pending;
+            let do_reset =
+                !self.shared_baseline && (flow.reset == FlowReset::Each || reset_pending);
             let Some(def) = tests.get(&stage.test) else {
                 let result =
                     TestResult::skipped(&stage.test, "unknown test referenced by flow".into());

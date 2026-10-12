@@ -98,6 +98,8 @@ async fn runner(store: Option<Arc<RecordingStore>>) -> TestRunner {
         mock,
         gate: Arc::new(NoopGate),
         abort_run: std::sync::atomic::AtomicBool::new(false),
+        shared_baseline: false,
+        exclusive: tokio::sync::RwLock::new(()),
     }
 }
 
@@ -662,4 +664,45 @@ async fn source_only_response_headers_survive_body_timeout_without_response_deta
     assert!(execution.redaction_sources[1].get("body").is_none());
     assert!(execution.redaction_sources[1].get("response").is_none());
     server.abort();
+}
+
+#[tokio::test]
+async fn mock_arming_tests_run_one_at_a_time() {
+    let runner = runner(None).await;
+    let (first, second) = (echo_test(), echo_test());
+    let empty = IndexMap::new();
+
+    // Without exclusivity the second arm evicts the first session before the
+    // first request lands, so each test sees the wrong call count.
+    let (first, second) = tokio::join!(
+        runner.run_test(&first, &empty, true, None, None),
+        runner.run_test(&second, &empty, true, None, None),
+    );
+
+    assert_eq!(first.status, TestStatus::Passed, "{first:?}");
+    assert_eq!(second.status, TestStatus::Passed, "{second:?}");
+}
+
+#[tokio::test]
+async fn evidence_clock_starts_after_waiting_for_the_mock_lock() {
+    let runner = runner(None).await;
+    let mut slow = echo_test();
+    slow.mocks.get_mut("target").unwrap().stubs[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .latency = Some(Duration::from_millis(150));
+    let queued = echo_test();
+    let empty = IndexMap::new();
+
+    let (_, (_, queued)) = tokio::join!(
+        runner.run_test(&slow, &empty, true, None, None),
+        runner.run_test_with_evidence(&queued, &empty, true, None, None),
+    );
+
+    let offset = event(&queued, "preparation").start_offset_ms.unwrap();
+    assert!(
+        offset < 100,
+        "lock wait leaked into the timeline: {offset}ms"
+    );
 }

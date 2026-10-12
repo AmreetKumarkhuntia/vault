@@ -2728,6 +2728,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures-util",
  "globset",
  "indexmap",
  "owo-colors",

@@ -277,7 +277,8 @@ external-target mode.
 
 ## VLT-009: Concurrent request scenarios cannot be expressed
 
-**Problem.** Tests, flows, and steps execute serially; the DSL has no parallel request group.
+**Problem.** Steps within a test execute serially; the DSL has no parallel request group.
+`run --parallel` overlaps whole flows and tests, not requests inside one test.
 
 **Risk.** Race conditions, duplicate concurrent submissions, and locking guarantees cannot be
 verified with Vault itself.

@@ -24,6 +24,7 @@ pub struct RunArgs {
     pub step: bool,
     pub shuffle: bool,
     pub seed: Option<u64>,
+    pub parallel: usize,
     pub report: Option<String>,
     pub junit: Option<String>,
     pub html: Option<String>,
@@ -653,7 +654,7 @@ pub fn print_env(env: String, suite_dir: String) -> i32 {
     0
 }
 
-pub fn run(args: RunArgs) -> i32 {
+pub fn run(mut args: RunArgs) -> i32 {
     let mut suite = match load_suite(&args.suite_dir) {
         Ok(s) => s,
         Err(c) => return c,
@@ -720,6 +721,13 @@ pub fn run(args: RunArgs) -> i32 {
         );
         return 2;
     }
+    if args.step && args.parallel > 1 {
+        eprintln!(
+            "{} --step needs serial execution; drop --parallel",
+            "usage error:".red().bold()
+        );
+        return 2;
+    }
     if args.step && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!(
             "{} --step needs an interactive terminal",
@@ -732,6 +740,8 @@ pub fn run(args: RunArgs) -> i32 {
         Ok(plan) => plan,
         Err(code) => return code,
     };
+    // Spare lanes do nothing, and tokio's semaphore panics on huge permit counts.
+    args.parallel = args.parallel.min(plan.flows.len() + plan.standalone.len());
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async { run_async(args, &suite, plan, reg, environment, redactor).await })
@@ -809,7 +819,23 @@ async fn run_async<'s>(
         mock,
         gate,
         abort_run: std::sync::atomic::AtomicBool::new(false),
+        shared_baseline: args.parallel > 1,
+        exclusive: tokio::sync::RwLock::new(()),
     };
+    if runner.shared_baseline {
+        println!(
+            "{} parallel lanes: {} (stores reset and global seed applied once)",
+            "→".cyan(),
+            args.parallel
+        );
+        if let Err(e) = runner.apply_baseline().await {
+            eprintln!(
+                "{} baseline reset/seed failed: {e}",
+                "environment error:".red().bold()
+            );
+            return 3;
+        }
+    }
 
     let tests_by_name: HashMap<String, &vault_dsl::TestDef> = suite
         .tests
@@ -895,52 +921,55 @@ async fn run_async<'s>(
     };
 
     let empty = IndexMap::new();
-    let mut executions = Vec::new();
-    for (item_index, item) in items.into_iter().enumerate() {
+    let lanes = tokio::sync::Semaphore::new(args.parallel);
+    let (runner, lanes, empty, tests_by_name) = (&runner, &lanes, &empty, &tests_by_name);
+    // FIFO permits start items in plan order; join_all yields them in that
+    // order too, so reports stay deterministic whatever finishes first.
+    let outputs = futures_util::future::join_all(items.iter().map(|item| async move {
+        let _lane = lanes
+            .acquire()
+            .await
+            .expect("lane semaphore is never closed");
         if runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
-            break;
+            return None;
         }
-        match item {
+        Some(match item {
             Item::Test(t) => {
-                let descriptor = &mut report_tests[descriptor_offsets[item_index]];
-                descriptor["result_index"] = json!(run.tests.len());
                 let (result, evidence) = runner
-                    .run_test_for_reporting(&t.def, &empty, true, None, None, collect_evidence)
+                    .run_test_for_reporting(&t.def, empty, true, None, None, collect_evidence)
                     .await;
-                for source in &evidence.redaction_sources {
-                    redactor.discover(source);
-                }
-                if collect_evidence {
-                    descriptor["execution_index"] = json!(executions.len());
-                    executions.push(
-                        serde_json::to_value(evidence).expect("execution evidence serializes"),
-                    );
-                }
-                run.tests.push(result);
+                (vec![result], vec![evidence])
             }
             Item::Flow(f) => {
                 let (outcome, evidence) = runner
-                    .run_flow_for_reporting(&f.def, &tests_by_name, collect_evidence)
+                    .run_flow_for_reporting(&f.def, tests_by_name, collect_evidence)
                     .await;
-                for (index, evidence) in evidence.into_iter().enumerate() {
-                    for source in &evidence.redaction_sources {
-                        redactor.discover(source);
-                    }
-                    if collect_evidence {
-                        report_tests[descriptor_offsets[item_index] + index]["execution_index"] =
-                            json!(executions.len());
-                        executions.push(
-                            serde_json::to_value(evidence).expect("execution evidence serializes"),
-                        );
-                    }
-                }
-                for index in 0..outcome.results.len() {
-                    report_tests[descriptor_offsets[item_index] + index]["result_index"] =
-                        json!(run.tests.len() + index);
-                }
-                run.tests.extend(outcome.results);
+                (outcome.results, evidence)
+            }
+        })
+    }))
+    .await;
+
+    let mut executions = Vec::new();
+    for (item_index, output) in outputs.into_iter().enumerate() {
+        let Some((results, evidence)) = output else {
+            continue;
+        };
+        let offset = descriptor_offsets[item_index];
+        for (index, evidence) in evidence.into_iter().enumerate() {
+            for source in &evidence.redaction_sources {
+                redactor.discover(source);
+            }
+            if collect_evidence {
+                report_tests[offset + index]["execution_index"] = json!(executions.len());
+                executions
+                    .push(serde_json::to_value(evidence).expect("execution evidence serializes"));
             }
         }
+        for index in 0..results.len() {
+            report_tests[offset + index]["result_index"] = json!(run.tests.len() + index);
+        }
+        run.tests.extend(results);
     }
     run.duration_ms = started.elapsed().as_millis() as u64;
 
@@ -948,6 +977,7 @@ async fn run_async<'s>(
     let mut metadata = json!({
         "started_at": started_at, "suite": suite.root.display().to_string(),
         "pattern": args.pattern, "tags": args.tags, "shuffle_seed": shuffle_seed,
+        "parallel": args.parallel,
         "items": report_items, "tests": report_tests,
     });
     // Discover across all surfaces before masking: a captured credential may
