@@ -63,7 +63,7 @@ LOAD ─▶ VALIDATE ─▶ RESET ─▶ SEED ─▶ ARM_MOCKS ─▶ RUN_STEPS 
 
 **Run-level preflight:** before test 1, probe target health endpoint, Postgres, Redis, and bind the mock listener. Any probe failure → exit 3 immediately with a reachability table. Never let 40 tests each time out against a target that isn't running.
 
-**Status lattice:** `PASSED < FAILED < ERRORED` per test; run status = worst. Execution is **serial in v1** (one target, one DB — see risks); the session/registry abstractions reserve the hooks for future parallelism.
+**Status lattice:** `PASSED < FAILED < ERRORED` per test; run status = worst. Execution is **serial by default** (one target, one DB — see risks). `run --parallel N` overlaps up to N flows/standalone tests: stores reset and the global seed applies once per run, items add only local seed, and tests that arm mocks, verify calls, or `watch` tables hold an exclusive lock because the mock listener has one active session and watch diffs whole tables.
 
 ---
 
@@ -697,9 +697,10 @@ testkit [--no-color] <command>    # global; also honors NO_COLOR and CLICOLOR=0
 testkit run [PATTERN]              # all tests, or glob over suite/test names: 'orders/*', orders/create_order
     --tag <t>            repeatable, AND semantics
     --env <name>         environment from vault.yaml (default: local)
-    --step               pause at lifecycle boundaries (implies serial, requires TTY — else exit 2)
+    --step               pause at lifecycle boundaries (serial only, requires TTY — else exit 2)
     --break-at <test:step>
     --shuffle [--seed N] # order-independence audit
+    --parallel <N>       # concurrent flows/tests (default 1); run-level reset + global seed, mock/watch tests exclusive
     --report <path>      JSON report (also settable in config)
     --junit <path>       JUnit XML for CI
     --html <path>        Offline HTML bundle with index, flow pages and shared CSS

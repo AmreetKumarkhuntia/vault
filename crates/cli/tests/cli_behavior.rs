@@ -1585,3 +1585,88 @@ fn color_no_color_covers_preflight_diagnostics() {
         "stderr:\n{stderr}"
     );
 }
+
+#[test]
+fn parallel_rejects_zero_lanes_and_step_mode() {
+    let sandbox = TempDir::new("parallel-usage");
+    let server = HttpServer::start();
+
+    let zero = output(configured_run(&sandbox, &server, "report pass").args(["--parallel", "0"]));
+    assert_exit(&zero, 2);
+
+    let step = output(configured_run(&sandbox, &server, "report pass").args([
+        "--parallel",
+        "2",
+        "--step",
+    ]));
+    assert_exit(&step, 2);
+    assert!(text(&step.stderr).contains("--step needs serial execution"));
+}
+
+#[test]
+fn parallel_run_reports_items_in_plan_order() {
+    let sandbox = TempDir::new("parallel-order");
+    let server = HttpServer::start();
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    fs::copy(
+        fixture("reporting").join("vault.yaml"),
+        suite.join("vault.yaml"),
+    )
+    .unwrap();
+    for name in ["alpha", "bravo", "charlie", "delta"] {
+        fs::write(
+            suite.join(format!("{name}.test.yaml")),
+            format!("test: {name}\nsteps:\n  - name: {name} request\n    request: {{ method: GET, path: /pass }}\n    expect: {{ status: 200 }}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        suite.join("chain.flow.yaml"),
+        "flow: chain\nstages:\n  - test: alpha\n  - test: bravo\n",
+    )
+    .unwrap();
+
+    let reported_names = |lanes: u64| {
+        let mut command = vault_command(&sandbox);
+        command
+            .arg("run")
+            .arg("--suite-dir")
+            .arg(&suite)
+            .arg("--parallel")
+            .arg(lanes.to_string())
+            .env(TARGET_URL_ENV, server.url());
+        assert_exit(&output(&mut command), 0);
+        let html = html_data(&sandbox.path().join("config-report.html"));
+        assert_eq!(html["metadata"]["parallel"], lanes);
+        let report: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(sandbox.path().join("config-report.json")).unwrap(),
+        )
+        .unwrap();
+        report["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|test| test["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let serial = reported_names(1);
+    assert_eq!(serial, ["alpha", "bravo", "charlie", "delta"]);
+    assert_eq!(reported_names(3), serial);
+}
+
+#[test]
+fn parallel_caps_lanes_at_the_selected_item_count() {
+    let sandbox = TempDir::new("parallel-cap");
+    let server = HttpServer::start();
+
+    let result = output(
+        configured_run(&sandbox, &server, "report pass")
+            .args(["--parallel", "18446744073709551615"]),
+    );
+
+    assert_exit(&result, 0);
+    let html = html_data(&sandbox.path().join("config-report.html"));
+    assert_eq!(html["metadata"]["parallel"], 1);
+}

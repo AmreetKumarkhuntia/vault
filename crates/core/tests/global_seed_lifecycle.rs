@@ -106,6 +106,8 @@ async fn runner(global_seed: Value, fail_seed_at: Option<usize>) -> (TestRunner,
             mock: Arc::new(MockServer::start("127.0.0.1:0").await.unwrap()),
             gate: Arc::new(NoopGate),
             abort_run: std::sync::atomic::AtomicBool::new(false),
+            shared_baseline: false,
+            exclusive: tokio::sync::RwLock::new(()),
         },
         state,
     )
@@ -357,4 +359,69 @@ stages:
         .contains("reset-bound initialization failed"));
     assert_eq!(&*state.events.lock().unwrap(), &["reset", "seed"]);
     assert_eq!(state.seed_docs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn apply_baseline_resets_then_seeds_global_once() {
+    let (runner, state) = runner(json!([{"sql": "global"}]), None).await;
+
+    runner.apply_baseline().await.unwrap();
+
+    assert_eq!(&*state.events.lock().unwrap(), &["reset", "seed"]);
+    assert_eq!(
+        &*state.seed_docs.lock().unwrap(),
+        &[json!([{"sql": "global"}])]
+    );
+}
+
+#[tokio::test]
+async fn shared_baseline_never_resets_or_reapplies_global_seed() {
+    let (mut runner, state) = runner(json!([{"sql": "global"}]), None).await;
+    runner.shared_baseline = true;
+    let standalone = test_def(
+        r#"
+test: standalone
+seed:
+  postgres:
+    - sql: standalone-local
+"#,
+    );
+    let stage = test_def(
+        r#"
+test: stage
+seed:
+  postgres:
+    - sql: stage-local
+"#,
+    );
+    let flow = flow_def(
+        r#"
+flow: each
+reset: each
+stages:
+  - test: stage
+  - test: stage
+"#,
+    );
+    let tests = HashMap::from([(stage.test.clone(), &stage)]);
+
+    let result = runner
+        .run_test(&standalone, &IndexMap::new(), true, None, None)
+        .await;
+    let outcome = runner.run_flow(&flow, &tests).await;
+
+    assert_eq!(result.status, TestStatus::Passed);
+    assert!(outcome
+        .results
+        .iter()
+        .all(|result| result.status == TestStatus::Passed));
+    assert_eq!(&*state.events.lock().unwrap(), &["seed", "seed", "seed"]);
+    assert_eq!(
+        &*state.seed_docs.lock().unwrap(),
+        &[
+            json!([{"sql": "standalone-local"}]),
+            json!([{"sql": "stage-local"}]),
+            json!([{"sql": "stage-local"}]),
+        ]
+    );
 }
