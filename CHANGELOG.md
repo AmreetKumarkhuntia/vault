@@ -1,3 +1,8 @@
+## v0.8.0 (2026-10-12)
+
+### Features
+- add --parallel lanes for flows and tests (12441c7)
+
 ## v0.7.1 (2026-10-05)
 
 ### Fixes
