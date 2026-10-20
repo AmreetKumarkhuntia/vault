@@ -2,7 +2,9 @@
 //! credential found in one payload is also removed from derived diagnostics.
 
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
+use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use regex::Regex;
 use serde_json::Value;
 use serde_json_path::JsonPath;
@@ -55,14 +57,31 @@ const DEFAULT_FIELDS: &[&str] = &[
     "xsrf_token",
 ];
 
+// Name endings that carry credentials (`new_password`, `db_password`, `userToken`,
+// `X-Custom-Authorization`), spelled in `normalize` form so `is_sensitive` compares directly.
+const SENSITIVE_SUFFIXES: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "apikey",
+    "authorization",
+    "cookie",
+    "privatekey",
+    "passphrase",
+];
+
 /// Stateful per-run redactor. Do not share discovered credentials between runs.
 pub struct Redactor {
     fields: BTreeSet<String>,
     paths: Vec<(String, JsonPath)>,
     patterns: Vec<Regex>,
     secrets: BTreeSet<String>,
+    // Rebuilt lazily after discovery: one scan per string instead of one pass per secret.
+    secret_matcher: OnceLock<Option<AhoCorasick>>,
     protected_paths: BTreeSet<String>,
     urls: Regex,
+    userinfo: Regex,
     assignments: Regex,
     credential_lines: Regex,
 }
@@ -106,18 +125,26 @@ impl Redactor {
             })
             .collect::<Result<Vec<_>, String>>()?;
         // Support spelling separators in plain text as well as object keys.
+        let spell = |name: &str| {
+            name.chars()
+                .map(|c| regex::escape(&c.to_string()))
+                .collect::<Vec<_>>()
+                .join("[-_ ]*")
+        };
         let names = fields
             .iter()
-            .map(|name| {
-                name.chars()
-                    .map(|c| regex::escape(&c.to_string()))
-                    .collect::<Vec<_>>()
-                    .join("[-_ ]*")
-            })
+            .map(|name| spell(name))
+            .collect::<Vec<_>>()
+            .join("|");
+        let roots = SENSITIVE_SUFFIXES
+            .iter()
+            .map(|name| spell(name))
             .collect::<Vec<_>>()
             .join("|");
         let assignments = Regex::new(&format!(
-            r#"(?i)(\b(?:{names})\b["']?\s*[:=]\s*)(?:"([^"]*)"|'([^']*)'|([^\s,;"'\}}\]&]+))"#
+            // Compound names (get_token, resetPassword) count only as `name=` or a quoted key:
+            // with a bare colon they would swallow the harness's own "step: status 200" lines.
+            r#"(?i)(\b(?:[\w-]*(?:{roots})\b(?:["']?\s*=|["']\s*:)|(?:{names})\b["']?\s*[:=])\s*)(?:"([^"]*)"|'([^']*)'|([^\s,;"'\}}\]&]+))"#
         ))
         .map_err(|e| format!("cannot compile report masking rules: {e}"))?;
         Ok(Self {
@@ -125,9 +152,11 @@ impl Redactor {
             paths,
             patterns,
             secrets: BTreeSet::new(),
+            secret_matcher: OnceLock::new(),
             protected_paths: BTreeSet::new(),
             urls: Regex::new(r#"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>"']+"#)
                 .expect("constant URL regex"),
+            userinfo: Regex::new(r"(://)[^/?#\s]*@").expect("constant userinfo regex"),
             assignments,
             credential_lines: Regex::new(
                 r"(?im)((?:proxy-)?authorization|(?:set-)?cookie)\s*:\s*([^\r\n]+)",
@@ -520,12 +549,16 @@ impl Redactor {
     }
 
     fn is_sensitive(&self, field: &str) -> bool {
-        self.fields.contains(&normalize(field))
+        let name = normalize(field);
+        self.fields.contains(&name) || SENSITIVE_SUFFIXES.iter().any(|s| name.ends_with(s))
     }
 
     fn is_sensitive_path(&self, path: &str) -> bool {
         let normalized = normalize_path(path);
+        // `steps.<name>` is the author's label for a step, not a field holding a value.
+        let label_parts = if path.starts_with("steps.") { 2 } else { 0 };
         path.split(['.', '/', '[', ']', '\'', '"'])
+            .skip(label_parts)
             .any(|part| self.is_sensitive(part))
             || self.paths.iter().any(|(selector, _)| selector == path)
             || self.protected_paths.iter().any(|protected| {
@@ -583,13 +616,17 @@ impl Redactor {
     fn remember(&mut self, text: &str) {
         // A one-character password must be masked at its source, but replacing
         // that character throughout prose would destroy statuses and IDs.
+        // Anything this large is a payload, not a credential; the key-based mask already
+        // removed it at its source, and remembering it would cost ~200 bytes of RAM per byte.
         if text.chars().count() >= 4
+            && text.len() <= 64 * 1024
             && !matches!(
                 text.to_ascii_lowercase().as_str(),
                 "true" | "false" | "null" | "none"
             )
             && text != MASK
         {
+            let known = self.secrets.len();
             self.secrets.insert(text.to_owned());
             if let Ok(encoded) = serde_json::to_string(text) {
                 self.secrets
@@ -600,6 +637,9 @@ impl Redactor {
             let encoded: String = url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
             self.secrets.insert(encoded.replace('+', "%20"));
             self.secrets.insert(encoded);
+            if self.secrets.len() != known {
+                self.secret_matcher = OnceLock::new();
+            }
         }
     }
 
@@ -724,7 +764,11 @@ impl Redactor {
             .replace_all(&output, |captures: &regex::Captures<'_>| {
                 let raw = captures.get(0).map_or("", |v| v.as_str());
                 let Ok(mut url) = url::Url::parse(raw) else {
-                    return raw.to_owned();
+                    // Unparseable URLs (bad port, odd host) still carry `user:pass@`.
+                    return self
+                        .userinfo
+                        .replace(raw, format!("${{1}}{MASK}@"))
+                        .into_owned();
                 };
                 let mut changed = false;
                 if !url.username().is_empty() {
@@ -774,13 +818,31 @@ impl Redactor {
     }
 
     fn mask_known_text(&self, text: &str) -> String {
-        let mut output = text.to_owned();
-        // Longest first prevents partial masking from exposing token suffixes.
-        let mut secrets: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
-        secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
-        for secret in secrets {
-            output = output.replace(secret, MASK);
-        }
+        let matcher = self.secret_matcher.get_or_init(|| {
+            // Leftmost-longest prevents partial masking from exposing token suffixes.
+            // The contiguous NFA builds fast even for multi-KB secrets; fall back to the
+            // automatic kind only if the pattern set exceeds its size limits.
+            let build = |kind| {
+                AhoCorasick::builder()
+                    .match_kind(MatchKind::LeftmostLongest)
+                    .kind(kind)
+                    .build(&self.secrets)
+            };
+            (!self.secrets.is_empty()).then(|| {
+                build(Some(AhoCorasickKind::ContiguousNFA)).expect("secret literals compile")
+            })
+        });
+        let mut output = match matcher {
+            Some(matcher) => {
+                let mut masked = String::with_capacity(text.len());
+                matcher.replace_all_with(text, &mut masked, |_, _, out| {
+                    out.push_str(MASK);
+                    true
+                });
+                masked
+            }
+            None => text.to_owned(),
+        };
         for pattern in &self.patterns {
             output = pattern.replace_all(&output, MASK).into_owned();
         }

@@ -2,10 +2,12 @@
 name = "vault-report"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aho-corasick = "1.1.5"
 anstream = "1.0.0"
 comfy-table = "8.0.0"
 owo-colors = "4.4.0"
@@ -17,3 +19,25 @@ url = "2.5.8"
 vault-core = { path = "../core" }
 vault-dsl = { path = "../dsl" }
 vault-store = { path = "../store" }
+
+# Integration tests live under the workspace tests/ directory; registering them here keeps
+# `cargo test -p` and CARGO_BIN_EXE_* working for this crate.
+
+[[test]]
+name = "html"
+path = "../../tests/report/html.rs"
+
+
+[[test]]
+name = "html_index"
+path = "../../tests/report/html_index.rs"
+
+
+[[test]]
+name = "junit"
+path = "../../tests/report/junit.rs"
+
+
+[[test]]
+name = "redact"
+path = "../../tests/report/redact.rs"

@@ -26,7 +26,7 @@ defaults:
   mock:
     unmatched: fail
   reset:
-    postgres: { mode: truncate, exclude: [schema_migrations, _sqlx_migrations] }
+    postgres: { mode: truncate }
     redis: { mode: flushdb }
   verify:
     settle: 400ms

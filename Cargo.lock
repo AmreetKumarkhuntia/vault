@@ -547,7 +547,6 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
- "chrono",
  "redis",
  "reqwest",
  "serde",
@@ -1941,6 +1940,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -2725,7 +2725,6 @@ name = "vault"
 version = "0.8.0"
 dependencies = [
  "anstream",
- "anyhow",
  "chrono",
  "clap",
  "futures-util",
@@ -2734,11 +2733,8 @@ dependencies = [
  "owo-colors",
  "rand",
  "reqwest",
- "serde",
  "serde_json",
- "serde_yaml_ng",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "vault-core",
  "vault-dsl",
@@ -2755,7 +2751,6 @@ version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
- "humantime",
  "indexmap",
  "minijinja",
  "rand",
@@ -2766,7 +2761,6 @@ dependencies = [
  "serde_json_path",
  "thiserror",
  "tokio",
- "tracing",
  "uuid",
  "vault-dsl",
  "vault-mock",
@@ -2777,7 +2771,6 @@ dependencies = [
 name = "vault-dsl"
 version = "0.8.0"
 dependencies = [
- "humantime",
  "humantime-serde",
  "indexmap",
  "serde",
@@ -2793,15 +2786,12 @@ version = "0.8.0"
 dependencies = [
  "axum",
  "indexmap",
- "minijinja",
  "parking_lot",
  "regex",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
- "tracing",
- "uuid",
  "vault-dsl",
  "vault-store",
 ]
@@ -2810,6 +2800,7 @@ dependencies = [
 name = "vault-report"
 version = "0.8.0"
 dependencies = [
+ "aho-corasick",
  "anstream",
  "comfy-table",
  "owo-colors",
@@ -2829,6 +2820,7 @@ version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "humantime",
  "regex",
  "serde",
  "serde_json",
@@ -2840,12 +2832,9 @@ name = "vault-store-postgres"
 version = "0.8.0"
 dependencies = [
  "async-trait",
- "chrono",
  "globset",
- "regex",
  "serde_json",
  "sqlx",
- "thiserror",
  "tokio",
  "vault-store",
  "walkdir",
@@ -2859,7 +2848,6 @@ dependencies = [
  "redis",
  "regex",
  "serde_json",
- "thiserror",
  "tokio",
  "vault-store",
 ]

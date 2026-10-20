@@ -1,4 +1,7 @@
 name: ci
+
+permissions:
+  contents: read
 on:
   push:
     branches: [main]
@@ -15,12 +18,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: every test file is registered
+        run: sh scripts/check-tests-registered.sh
+      - name: Makefile honours the compose store URLs
+        run: VAULT_PG_URL=postgres://x make -n target-start | grep -q "DATABASE_URL='postgres://x'"
 
   test:
     runs-on: ubuntu-latest
@@ -46,6 +54,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
 
       - name: unit and crate tests
@@ -53,6 +63,12 @@ jobs:
 
       - name: PostgreSQL SQL fixture selection scenarios
         run: cargo test -p vault-store-postgres --test sql_file -- --ignored --test-threads=1
+
+      - name: PostgreSQL verify and reset scenarios
+        run: cargo test -p vault-store-postgres --test verify -- --ignored --test-threads=1
+
+      - name: Redis reset and verify scenarios
+        run: cargo test -p vault-store-redis --test live -- --ignored --test-threads=1
 
       - name: build
         run: cargo build --workspace
@@ -112,6 +128,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:

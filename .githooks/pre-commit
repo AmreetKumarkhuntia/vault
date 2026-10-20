@@ -1,0 +1,8 @@
+#!/bin/sh
+# Same checks as the CI lint job, so a commit that passes here passes there.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+sh scripts/check-tests-registered.sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+exec "$(dirname "$0")/chain-system-hook" pre-commit "$@"

@@ -1,7 +1,7 @@
 # Development commands. `make help` lists everything.
 
-PG_URL    ?= postgres://$(USER)@localhost:5432/vault_demo
-REDIS_URL ?= redis://127.0.0.1:6379/15
+PG_URL    ?= $(or $(VAULT_PG_URL),postgres://$(USER)@localhost:5432/vault_demo)
+REDIS_URL ?= $(or $(VAULT_REDIS_URL),redis://127.0.0.1:6379/15)
 MOCK_BASE ?= http://127.0.0.1:9095
 PORT      ?= 8091
 ARGS      ?=
@@ -11,11 +11,12 @@ BIN  := ./target/debug
 
 .PHONY: help build test validate list env suite negative test-all demo \
         target-start target-stop db-setup stores-up stores-down clean \
-        npm-pack npm-smoke release-dry-run
+        npm-pack npm-smoke release-dry-run hooks
 
 help:
 	@echo "make build         build the whole workspace"
 	@echo "make test          workspace Rust tests, including black-box CLI tests"
+	@echo "make hooks         install the pre-commit gate (fmt + clippy, same as the CI lint job)"
 	@echo "make suite         start demo-target, run the YAML flow suite, stop it"
 	@echo "make negative      run the deliberately-failing showcase tests (exit 1 is the point)"
 	@echo "make test-all      test + suite + negative"
@@ -38,6 +39,10 @@ build:
 test:
 	cargo test --workspace
 
+hooks:
+	git config core.hooksPath .githooks
+	@echo "hooks installed: fmt + clippy run before every commit; machine-wide hooks still run after them"
+
 validate: build
 	$(BIN)/vault validate
 
@@ -55,7 +60,7 @@ target-start: build db-setup
 	@if [ -f $(PID) ] && kill -0 $$(cat $(PID)) 2>/dev/null; then \
 		echo "demo-target already running (pid $$(cat $(PID)))"; \
 	else \
-		PORT=$(PORT) DATABASE_URL=$(PG_URL) REDIS_URL=$(REDIS_URL) \
+		PORT=$(PORT) DATABASE_URL='$(PG_URL)' REDIS_URL='$(REDIS_URL)' \
 		PAYMENTS_URL=$(MOCK_BASE)/payments EMAIL_URL=$(MOCK_BASE)/email \
 		$(BIN)/demo-target > demo-target.log 2>&1 & echo $$! > $(PID); \
 		sleep 1; \
@@ -89,7 +94,7 @@ release-dry-run:
 	gh workflow run release.yaml
 
 stores-up:
-	docker compose up -d
+	docker compose up -d --wait
 
 stores-down:
 	docker compose down

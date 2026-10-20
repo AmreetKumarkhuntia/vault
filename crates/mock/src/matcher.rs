@@ -26,13 +26,10 @@ pub fn component_score(spec: &MatchSpec, req: &RecordedRequest) -> u32 {
         }
     }
     if !spec.query.is_empty() {
-        let all = spec.query.iter().all(|(k, v)| {
-            let actual = req.query.get(k);
-            match v.as_str() {
-                Some("*") => actual.is_some(),
-                _ => actual.is_some_and(|a| loose_eq(v, a)),
-            }
-        });
+        let all = spec
+            .query
+            .iter()
+            .all(|(k, v)| value_matches(v, req.query.get(k), &ctx));
         if all {
             score += 1;
         }
@@ -45,10 +42,7 @@ pub fn component_score(spec: &MatchSpec, req: &RecordedRequest) -> u32 {
                     .find(|(hk, _)| hk.eq_ignore_ascii_case(k))
                     .map(|(_, hv)| hv)
             });
-            match v.as_str() {
-                Some("*") => actual.is_some(),
-                _ => actual.is_some_and(|a| matchers::matches_value(v, Some(a), &ctx)),
-            }
+            value_matches(v, actual, &ctx)
         });
         if all {
             score += 1;
@@ -144,18 +138,31 @@ pub fn body_matches(spec: &Value, req: &RecordedRequest, ctx: &MatchCtx) -> bool
     false
 }
 
+/// Header and query values arrive as strings, so plain scalars compare
+/// textually; matcher objects (`{regex}`, `!uuid`, `absent`) see the raw
+/// actual value, absent included. A repeated key is an array: any element may match.
+fn value_matches(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -> bool {
+    if expected.as_str() == Some("*") {
+        return actual.is_some();
+    }
+    if matchers::is_tag_matcher(expected) || matchers::is_matcher_map(expected) {
+        return matchers::matches_any(expected, actual, ctx);
+    }
+    match actual {
+        Some(Value::Array(items)) => items.iter().any(|a| loose_eq(expected, a)),
+        Some(a) => loose_eq(expected, a),
+        None => false,
+    }
+}
+
 fn loose_eq(expected: &Value, actual: &Value) -> bool {
     if expected == actual {
         return true;
     }
-    // Query params arrive as strings; compare textually.
-    let e = expected
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| expected.to_string());
-    let a = actual
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| actual.to_string());
-    e == a
+    let text = |v: &Value| {
+        v.as_str()
+            .map(String::from)
+            .unwrap_or_else(|| v.to_string())
+    };
+    text(expected) == text(actual)
 }

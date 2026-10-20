@@ -92,6 +92,9 @@ impl Drop for HttpServer {
 }
 
 fn serve_http(mut stream: TcpStream) -> std::io::Result<()> {
+    // macOS hands accepted sockets the listener's non-blocking mode, which makes the read
+    // timeout a no-op and the first read fail before the client has sent anything.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut request = Vec::with_capacity(1024);
     let mut buffer = [0_u8; 1024];
@@ -148,6 +151,15 @@ fn serve_http(mut stream: TcpStream) -> std::io::Result<()> {
     }
     let (status, body) = match path.split('?').next().unwrap_or(path) {
         "/pass" | "/healthz" => ("200 OK", r#"{"status":"ok"}"#),
+        "/slow" => {
+            thread::sleep(Duration::from_secs(3));
+            ("200 OK", r#"{"status":"ok"}"#)
+        }
+        // OSC 52 (clipboard write) and BEL, as JSON escapes the client decodes.
+        "/escape" => (
+            "200 OK",
+            r#"{"msg":"\u001b]52;c;ZXZpbA==\u0007 \u001b[2K\rfake"}"#,
+        ),
         "/secret"
             if request
                 .to_ascii_lowercase()
@@ -181,8 +193,9 @@ fn encode_test_component(value: &str) -> String {
 }
 
 fn fixture(name: &str) -> PathBuf {
+    // CARGO_MANIFEST_DIR is crates/cli; the fixtures live beside this file under tests/cli.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("../../tests/cli/fixtures")
         .join(name)
         .canonicalize()
         .expect("CLI test fixture should exist")
@@ -1669,4 +1682,143 @@ fn parallel_caps_lanes_at_the_selected_item_count() {
     assert_exit(&result, 0);
     let html = html_data(&sandbox.path().join("config-report.html"));
     assert_eq!(html["metadata"]["parallel"], 1);
+}
+
+#[test]
+fn terminal_output_neutralises_control_characters_from_the_target() {
+    let server = HttpServer::start();
+    let sandbox = TempDir::new("terminal-escape");
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(fixture("escape"))
+        .env(TARGET_URL_ENV, server.url())
+        .env("CLICOLOR_FORCE", "1");
+
+    let result = output(&mut command);
+    assert_exit(&result, 1);
+    assert_has_ansi("forced stdout", &result.stdout);
+    let stdout = text(&result.stdout);
+    assert!(stdout.contains('\u{fffd}'), "sink not exercised:\n{stdout}");
+    assert!(
+        !result.stdout.windows(2).any(|w| w == b"\x1b]"),
+        "OSC sequence leaked:\n{stdout}"
+    );
+    assert!(!result.stdout.contains(&0x07), "BEL leaked:\n{stdout}");
+    assert!(!result.stdout.contains(&b'\r'), "CR leaked:\n{stdout}");
+}
+
+const PLAIN_CONFIG: &str = "version: 1\nenvironments:\n  local:\n    target: { base_url: http://127.0.0.1:1 }\n    mock_server: { bind: 127.0.0.1:9095 }\n";
+
+#[test]
+fn env_prints_the_mounted_prefix_for_each_dependency() {
+    let sandbox = TempDir::new("env-prefix");
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    fs::write(suite.join("vault.yaml"), PLAIN_CONFIG).unwrap();
+    fs::write(
+        suite.join("pay.test.yaml"),
+        "test: pay\nmocks:\n  payments-api: { prefix: /v1/pay/, stubs: [] }\n  email: { stubs: [] }\nsteps: []\n",
+    )
+    .unwrap();
+    let mut command = vault_command(&sandbox);
+    command.arg("env").arg("--suite-dir").arg(&suite);
+    let result = output(&mut command);
+    assert_exit(&result, 0);
+    let stdout = text(&result.stdout);
+    assert!(
+        stdout.contains("export PAYMENTS_API_URL=http://127.0.0.1:9095/v1/pay\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("export EMAIL_URL=http://127.0.0.1:9095/email\n"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn tag_filter_selects_tagged_tests_inside_an_unselected_flow() {
+    let sandbox = TempDir::new("tag-flow-member");
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    fs::write(suite.join("vault.yaml"), PLAIN_CONFIG).unwrap();
+    fs::write(
+        suite.join("member.test.yaml"),
+        "test: member\ntags: [smoke]\nsteps: []\n",
+    )
+    .unwrap();
+    fs::write(suite.join("other.test.yaml"), "test: other\nsteps: []\n").unwrap();
+    fs::write(
+        suite.join("f.flow.yaml"),
+        "flow: f\nstages:\n  - test: member\n  - test: other\n",
+    )
+    .unwrap();
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("list")
+        .arg("-t")
+        .arg("smoke")
+        .arg("--suite-dir")
+        .arg(&suite);
+    let result = output(&mut command);
+    assert_exit(&result, 0);
+    let stdout = text(&result.stdout);
+    assert!(stdout.contains("member"), "{stdout}");
+    assert!(stdout.contains("0 flows, 1 standalone tests"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_mid_run_still_writes_reports_and_exits_130() {
+    let server = HttpServer::start();
+    let sandbox = TempDir::new("interrupt");
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    fs::write(
+        suite.join("vault.yaml"),
+        "version: 1\nenvironments:\n  local:\n    target: { base_url: \"${env.VAULT_CLI_TEST_URL}\" }\n    mock_server: { bind: 127.0.0.1:0 }\nreport:\n  json: result.json\n",
+    )
+    .unwrap();
+    fs::write(
+        suite.join("a_fast.test.yaml"),
+        "test: fast\nsteps:\n  - name: fast\n    request: { method: GET, path: /pass }\n    expect: { status: 200 }\n",
+    )
+    .unwrap();
+    fs::write(
+        suite.join("b_slow.test.yaml"),
+        "test: slow\ntimeout: 30s\nsteps:\n  - name: slow\n    request: { method: GET, path: /slow, timeout: 20s }\n    expect: { status: 200 }\n",
+    )
+    .unwrap();
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .env(TARGET_URL_ENV, server.url())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = command.spawn().expect("vault subprocess should start");
+    thread::sleep(Duration::from_millis(800));
+    let killed = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .expect("kill should run");
+    assert!(killed.success());
+    let result = child.wait_with_output().expect("vault should exit");
+
+    assert_exit(&result, 130);
+    assert!(
+        text(&result.stderr).contains("interrupted"),
+        "{}",
+        text(&result.stderr)
+    );
+    let json = fs::read_to_string(sandbox.path().join("result.json"))
+        .expect("the JSON report should still be written after SIGTERM");
+    assert!(json.contains("\"fast\""), "{json}");
+    assert!(
+        json.contains("\"slow\"") && json.contains("run interrupted"),
+        "the unfinished test must appear as skipped:\n{json}"
+    );
 }

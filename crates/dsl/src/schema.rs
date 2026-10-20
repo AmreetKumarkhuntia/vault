@@ -264,6 +264,19 @@ pub struct MockDep {
     pub stubs: Vec<Stub>,
 }
 
+impl MockDep {
+    /// Mount path on the shared listener: `/<name>` unless `prefix` overrides it.
+    /// Normalised to a leading `/` and no trailing one; the root mount is "".
+    pub fn mount(&self, name: &str) -> String {
+        let raw = self.prefix.as_deref().unwrap_or(name).trim_matches('/');
+        if raw.is_empty() {
+            String::new()
+        } else {
+            format!("/{raw}")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stub {

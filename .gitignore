@@ -3,10 +3,10 @@
 .DS_Store
 /tmp
 demo-target.log
-testkit-report.json
-testkit-junit.xml
+/dist
 npm/node_modules/
 npm/*.tgz
 npm/bin/.cache/
+npm/bin/SHA256SUMS
 
 .archify

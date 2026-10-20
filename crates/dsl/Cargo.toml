@@ -2,15 +2,32 @@
 name = "vault-dsl"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-humantime = "2.4.0"
 humantime-serde = "1.1.1"
 indexmap = { version = "2.14.2", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serde_yaml_ng = "0.10.0"
 thiserror = "2.0.20"
 walkdir = "2.5.0"
+
+# Integration tests live under the workspace tests/ directory; registering them here keeps
+# `cargo test -p` and CARGO_BIN_EXE_* working for this crate.
+
+[[test]]
+name = "discover"
+path = "../../tests/dsl/discover.rs"
+
+
+[[test]]
+name = "global_seed"
+path = "../../tests/dsl/global_seed.rs"
+
+
+[[test]]
+name = "report_config"
+path = "../../tests/dsl/report_config.rs"

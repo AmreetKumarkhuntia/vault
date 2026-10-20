@@ -8,6 +8,7 @@ use crate::CoreError;
 /// Typing rule: a string that is EXACTLY one expression (`"{{ order_id }}"`)
 /// substitutes the native JSON value — a captured number stays a number,
 /// which is what makes DB matchers work. Mixed strings render to text.
+#[derive(Clone)]
 pub struct TemplateEngine {
     env: Environment<'static>,
     ctx: Value,

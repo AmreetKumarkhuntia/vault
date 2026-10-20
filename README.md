@@ -64,6 +64,7 @@ Day-to-day commands (`make help` lists all):
 
 ```sh
 make test        # workspace Rust tests, including black-box CLI subprocess tests
+make hooks       # install the pre-commit gate: fmt + clippy, the same checks as the CI lint job
 make suite       # start demo-target, run the YAML flow suite, stop it
 make suite ARGS='-t smoke -v'
 make negative    # the deliberately-failing showcase (exit 1 is the point)
@@ -94,8 +95,8 @@ vault run --parallel 4     # up to 4 flows/standalone tests at once (see "Parall
 The npm-friendly shorthand accepts either the suite directory or its root config file, and forwards additional run options:
 
 ```sh
-npx vault --run ./tests/flows
-npx vault --run ./tests/flows/vault.yaml -t smoke
+npx @thunderkiller/vault --run ./tests/flows
+npx @thunderkiller/vault --run ./tests/flows/vault.yaml -t smoke
 ```
 
 ### Color-free output
@@ -106,7 +107,7 @@ deterministic plain output:
 
 ```sh
 vault --no-color run --suite-dir tests/flows
-npx vault --no-color --run tests/flows
+npx @thunderkiller/vault --no-color --run tests/flows
 ```
 
 A non-empty `NO_COLOR` or `CLICOLOR=0` also disables color. These settings, in that order, take
@@ -141,7 +142,7 @@ Generate reports for the current run and open `target/index.html` in a browser:
 
 ```sh
 vault run --html target/vault-report.html
-npx vault --run ./tests/flows --html target/vault-report.html
+npx @thunderkiller/vault --run ./tests/flows --html target/vault-report.html
 ```
 
 The demo suite enables this output in `vault.yaml`. Your own suite can do the same:
@@ -402,11 +403,14 @@ crates/
   mock/            recording mock server + outbound-call verification (bipartite matching)
   core/            engine: lifecycle, templating (minijinja), captures, eventually/settle, flows
   report/          terminal / JSON / JUnit / offline HTML renderers and masking
-  cli/             the `vault` binary + black-box CLI tests in cli/tests
+  cli/             the `vault` binary
 examples/
   demo-target/     the order service the e2e suite runs against
 tests/
-  code/            Rust tests for the harness code (`cargo test --workspace`)
+  <crate>/         integration tests for crates/<crate>, registered as [[test]]
+                   targets in that crate's Cargo.toml; cli/ holds the black-box
+                   CLI subprocess tests and their fixtures
+  code/            cross-crate harness tests (`cargo test --workspace` runs everything)
   flows/           the YAML suites that test flows: vault.yaml config,
                    *.test.yaml tests, *.flow.yaml flows, fixtures/
 docs/DESIGN.md     full design document
@@ -454,4 +458,24 @@ CI, coverage, and application behavior.
 - Transaction-rollback isolation is impossible for a black-box target (it owns its own connections) — that's why isolation is TRUNCATE-based and documented as such.
 - When enabled, Redis verification requires a dedicated logical DB (e.g. `/15`); the driver refuses db 0 without `allow_db0: true`.
 - The target's in-process caches don't reset with the DB; if your server has a reset endpoint, call it via a seed `sql:`-style hook or an extra step.
-- `skip: "${env.FLAG:-reason}"` gates a test on an environment variable — an empty value means "run it" (see `tests/negative/`).
+- `skip: "${env.FLAG:-reason}"` gates a test on an environment variable — an empty value means "run it" (see `tests/flows/negative/`).
+- Postgres reset only touches the `public` schema and always keeps the common migration tables
+  (`schema_migrations`, `_sqlx_migrations`, `__diesel_schema_migrations`, `flyway_schema_history`,
+  `alembic_version`, `_prisma_migrations`, `django_migrations`, `knex_migrations`,
+  `knex_migrations_lock`, `goose_db_version`, `spatial_ref_sys`); a reset `exclude` list extends
+  that set. An unknown reset `mode` or key is an error, never a truncate or flush. `TRUNCATE`
+  runs with `CASCADE`, so a table that references a truncated one is emptied even when excluded.
+  Tables outside `public` (reachable as `schema.table` in seed and verify) are not reset.
+- Verification reads rows into memory; a table with more than 1000 rows fails the check instead of
+  silently comparing a subset; under `--parallel`, where tables are not reset between tests, a
+  long run can grow a table past the cap. A malformed `expect`/`expect_absent` (a mapping instead of a list),
+  an unknown `count`, a regex that does not compile, an unknown `!tag` or an unreadable duration is
+  an error, never a vacuous pass.
+- YAML mapping order is preserved: vars, mocks, seed and verify blocks run in declaration order,
+  and JSON reports keep that order.
+- A test that declares `mocks` or `verify.calls` waits, after its last step, until no outbound
+  call has arrived for `verify.settle` (default 500ms, capped at 4× that or 2s), so late calls
+  are counted. Tests that record no calls now pay that wait too.
+- Fields and headers whose name ends in `password`, `passwd`, `secret`, `token`, `apikey`,
+  `authorization`, `cookie`, `privatekey` or `passphrase` are masked in reports by default.
+- Ctrl-C or SIGTERM during `vault run` still writes the reports for finished items and exits `130`.

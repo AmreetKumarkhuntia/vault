@@ -257,10 +257,9 @@ impl TestRunner {
             .mocks
             .iter()
             .map(|(name, dep)| {
-                let prefix = dep.prefix.clone().unwrap_or_else(|| format!("/{name}"));
                 (
                     name.clone(),
-                    json!({"base_url": format!("{}{}", self.mock.base_url(), prefix)}),
+                    json!({"base_url": format!("{}{}", self.mock.base_url(), dep.mount(name))}),
                 )
             })
             .collect();
@@ -359,10 +358,16 @@ impl TestRunner {
             json!({"dependencies": def.mocks.keys().collect::<Vec<_>>()}),
         );
         let rendered_mocks = render_mocks(&engine, def)?;
+        let response_engine = engine.clone();
         let guard = self.mock.arm(Session::new(
             &def.test,
             &rendered_mocks,
             self.defaults.mock.unmatched.clone(),
+            Arc::new(move |response, request| {
+                let mut engine = response_engine.clone();
+                engine.set_flat("request", request);
+                engine.render_value(response).map_err(|e| e.to_string())
+            }),
         ));
 
         evidence.session(guard.session());
@@ -403,6 +408,7 @@ impl TestRunner {
             }
         }
 
+        let steps_done_ms = now_ms() as u64;
         for (name, _) in def.steps.iter().flat_map(|s| &s.capture) {
             if let Some(v) = engine.context().get(name) {
                 result.captures.insert(name.clone(), v.clone());
@@ -465,7 +471,7 @@ impl TestRunner {
 
         if !def.verify.calls.is_empty() || !def.mocks.is_empty() {
             let quiet = evidence.start("mock_quiet", &def.test, None, 1, json!({}));
-            self.wait_for_mock_quiet(&guard).await;
+            self.wait_for_mock_quiet(&guard, steps_done_ms).await;
             evidence.complete(quiet, ExecutionStatus::Passed);
             let event = evidence.start("verify_calls", &def.test, None, 1, json!({}));
             let report = guard.drain();
@@ -651,7 +657,7 @@ impl TestRunner {
     ) -> Result<VerifyOutcome, CoreError> {
         let settle = self.defaults.verify.settle;
         let interval = self.defaults.verify.poll_interval;
-        let deadline_ms = max_eventually_ms(doc);
+        let deadline_ms = max_eventually_ms(doc)?;
         let opts = VerifyOpts {
             anchor_unix_ms: anchor_ms,
             settle,
@@ -670,7 +676,7 @@ impl TestRunner {
                 attempts,
                 json!({"settle_confirmation": false}),
             );
-            let outcome = store.verify(doc, &opts).await?;
+            let mut outcome = store.verify(doc, &opts).await?;
             evidence.checks(poll, &outcome);
             evidence.complete(
                 poll,
@@ -707,6 +713,8 @@ impl TestRunner {
                 if confirm.passed() {
                     return Ok(stamp(confirm, attempts, started));
                 }
+                // The settle re-check is the latest observation; never return the earlier pass.
+                outcome = confirm;
             }
             if Instant::now() >= deadline {
                 return Ok(stamp(outcome, attempts, started));
@@ -715,13 +723,15 @@ impl TestRunner {
         }
     }
 
-    async fn wait_for_mock_quiet(&self, guard: &SessionGuard) {
+    async fn wait_for_mock_quiet(&self, guard: &SessionGuard, steps_done_ms: u64) {
         let settle = self.defaults.verify.settle.as_millis() as u64;
         let budget = Instant::now() + Duration::from_millis((settle * 4).max(2000));
         loop {
-            let last = guard.last_recorded_at_ms();
+            // Quiet is measured from the later of the last recording and the end of
+            // the steps, so a test that recorded nothing still waits out late calls.
+            let last = guard.last_recorded_at_ms().max(steps_done_ms);
             let now = now_ms() as u64;
-            if last == 0 || now.saturating_sub(last) >= settle || Instant::now() >= budget {
+            if now.saturating_sub(last) >= settle || Instant::now() >= budget {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -972,8 +982,11 @@ impl TestRunner {
                 }
             }
             if let Some(e) = with_error {
-                let mut r = TestResult::skipped(&stage.test, format!("with: render failed: {e}"));
+                let mut r = TestResult::skipped(&stage.test, String::new());
                 r.status = TestStatus::Errored;
+                r.skip_reason = None;
+                r.error = Some(format!("with: render failed: {e}"));
+                r.flow = Some(flow.flow.clone());
                 if collect_sources {
                     executions.push(self.stage_evidence(
                         &r,
@@ -1064,10 +1077,24 @@ fn render_mocks(
 ) -> Result<IndexMap<String, vault_dsl::MockDep>, CoreError> {
     let mut out = IndexMap::new();
     for (name, dep) in &def.mocks {
-        let raw = serde_json::to_value(dep)
+        let mut raw = serde_json::to_value(dep)
             .map_err(|e| CoreError::Harness(format!("mocks.{name}: {e}")))?;
-        // Serve-time namespaces stay for the mock server to render per request.
-        let rendered = render_except_request_ns(engine, &raw)?;
+        // Responses render per request (they may use `request.*` and `uuid()`),
+        // everything else renders once, now.
+        let mut responses = Vec::new();
+        for stub in raw["stubs"].as_array_mut().into_iter().flatten() {
+            responses.push((stub["response"].take(), stub["responses"].take()));
+        }
+        let mut rendered = engine.render_value(&raw)?;
+        for (stub, (response, many)) in rendered["stubs"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .zip(responses)
+        {
+            stub["response"] = response;
+            stub["responses"] = many;
+        }
         let dep: vault_dsl::MockDep = serde_json::from_value(rendered)
             .map_err(|e| CoreError::Harness(format!("mocks.{name}: {e}")))?;
         out.insert(name.clone(), dep);
@@ -1075,45 +1102,27 @@ fn render_mocks(
     Ok(out)
 }
 
-fn render_except_request_ns(engine: &TemplateEngine, v: &Value) -> Result<Value, CoreError> {
-    match v {
-        Value::String(s) if s.contains("{{") => {
-            if s.contains("request.") || s.contains("uuid()") || s.contains("now()") {
-                Ok(v.clone())
-            } else {
-                engine.render_value(v)
-            }
-        }
-        Value::Array(items) => Ok(Value::Array(
-            items
-                .iter()
-                .map(|i| render_except_request_ns(engine, i))
-                .collect::<Result<_, _>>()?,
-        )),
-        Value::Object(m) => {
-            let mut out = Map::new();
-            for (k, val) in m {
-                out.insert(k.clone(), render_except_request_ns(engine, val)?);
-            }
-            Ok(Value::Object(out))
-        }
-        other => Ok(other.clone()),
-    }
-}
-
-fn max_eventually_ms(doc: &Value) -> u64 {
+/// Longest `eventually:` in the doc. An unreadable value is an error: silently treating it as
+/// zero turned bounded polling into a single-shot check.
+fn max_eventually_ms(doc: &Value) -> Result<u64, CoreError> {
     match doc {
-        Value::Array(entries) => entries.iter().map(max_eventually_ms).max().unwrap_or(0),
-        Value::Object(m) => m
-            .get("eventually")
-            .and_then(|e| match e {
-                Value::String(s) => humantime_ms(s),
-                Value::Number(n) => n.as_i64().map(|s| s * 1000),
-                _ => None,
-            })
-            .map(|ms| ms.max(0) as u64)
-            .unwrap_or(0),
-        _ => 0,
+        Value::Array(entries) => entries
+            .iter()
+            .map(max_eventually_ms)
+            .try_fold(0, |max, each| Ok(max.max(each?))),
+        Value::Object(m) => match m.get("eventually") {
+            None => Ok(0),
+            Some(Value::String(s)) => humantime_ms(s)
+                .map(|ms| ms.max(0) as u64)
+                .ok_or_else(|| CoreError::Harness(format!("verify: bad eventually `{s}`"))),
+            Some(Value::Number(n)) => {
+                Ok(n.as_f64().map_or(0, |secs| (secs * 1000.0).max(0.0) as u64))
+            }
+            Some(other) => Err(CoreError::Harness(format!(
+                "verify: bad eventually {other}"
+            ))),
+        },
+        _ => Ok(0),
     }
 }
 

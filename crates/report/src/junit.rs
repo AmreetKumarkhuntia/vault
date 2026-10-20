@@ -12,7 +12,8 @@ pub fn to_junit_xml(run: &RunResult) -> String {
     ));
     for t in &run.tests {
         out.push_str(&format!(
-            "  <testcase name=\"{}\" time=\"{:.3}\"",
+            "  <testcase classname=\"{}\" name=\"{}\" time=\"{:.3}\"",
+            escape(t.flow.as_deref().unwrap_or("vault")),
             escape(&t.name),
             t.duration_ms as f64 / 1000.0
         ));
@@ -50,8 +51,21 @@ pub fn to_junit_xml(run: &RunResult) -> String {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            // Attribute-value normalization turns literal line breaks and tabs into spaces.
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            '\t' => out.push_str("&#9;"),
+            // XML 1.0 forbids the other C0 controls and U+FFFE/U+FFFF even as character references.
+            c if c < ' ' || matches!(c, '\u{fffe}' | '\u{ffff}') => out.push('\u{fffd}'),
+            c => out.push(c),
+        }
+    }
+    out
 }

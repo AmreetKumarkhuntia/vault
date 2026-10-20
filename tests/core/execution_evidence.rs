@@ -24,6 +24,8 @@ struct RecordingStore {
     seeds: AtomicU32,
     verifies: AtomicU32,
     fail_polls: u32,
+    /// Fail every verify call at or after this index (models state appearing late).
+    fail_from: Option<u32>,
     fail_seed: bool,
 }
 
@@ -60,7 +62,7 @@ impl StateStore for RecordingStore {
     async fn verify(&self, _: &StoreDoc, _: &VerifyOpts) -> Result<VerifyOutcome, StoreError> {
         let call = self.verifies.fetch_add(1, Ordering::SeqCst);
         let mut outcome = VerifyOutcome::default();
-        if call < self.fail_polls {
+        if call < self.fail_polls || self.fail_from.is_some_and(|from| call >= from) {
             outcome.checks.push(CheckResult::Fail(CheckFailure::new(
                 "pending row",
                 "verify.postgres",
@@ -378,6 +380,16 @@ async fn flow_evidence_stays_aligned_with_skips_errors_exports_and_reset_once() 
     assert_eq!(executions.len(), 4);
     assert_eq!(outcome.results[0].status, TestStatus::Skipped);
     assert_eq!(outcome.results[1].status, TestStatus::Errored);
+    let errored = &outcome.results[1];
+    assert!(
+        errored
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("with: render failed")),
+        "{errored:?}"
+    );
+    assert!(errored.skip_reason.is_none());
+    assert_eq!(errored.flow.as_deref(), Some("identity"));
     assert_eq!(store.resets.load(Ordering::SeqCst), 1);
     for (index, execution) in executions.iter().enumerate() {
         assert_eq!(execution.flow_stage, Some(index));
@@ -514,10 +526,7 @@ async fn prepared_forms_queries_and_default_headers_match_the_sent_request() {
     let call = &event(&execution, "finalization").details["recorded_calls"][0];
     assert_eq!(request["body"], call["request"]["body"]);
     assert_eq!(request["body"], "field=a+%26+b");
-    assert_eq!(
-        request["headers"]["x-default"],
-        json!(["configured", "local"])
-    );
+    assert_eq!(request["headers"]["x-default"], "local");
     assert_eq!(request["query"].as_array().unwrap().len(), 3);
     assert_eq!(
         request["query"][0],
@@ -704,5 +713,224 @@ async fn evidence_clock_starts_after_waiting_for_the_mock_lock() {
     assert!(
         offset < 100,
         "lock wait leaked into the timeline: {offset}ms"
+    );
+}
+
+#[tokio::test]
+async fn late_call_after_last_step_fails_a_never_called_expectation() {
+    let mut runner = runner(None).await;
+    runner.defaults.verify.settle = Duration::from_millis(300);
+    // No steps at all: the test records nothing itself, which used to skip the settle wait.
+    let def = definition(json!({
+        "test": "late",
+        "mocks": { "target": { "stubs": [
+            { "match": { "path": "/late" }, "response": { "status": 200 } }
+        ] } },
+        "verify": { "calls": [
+            { "dependency": "target", "match": { "path": "/late" }, "count": 0 }
+        ] },
+        "steps": []
+    }));
+    let late = format!("{}/target/late", runner.mock.base_url());
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = reqwest::get(late).await;
+    });
+
+    let result = runner
+        .run_test(&def, &IndexMap::new(), true, None, None)
+        .await;
+    assert_eq!(result.status, TestStatus::Failed, "{result:?}");
+}
+
+#[tokio::test]
+async fn stub_response_mixes_vars_and_request_with_native_types() {
+    let runner = runner(None).await;
+    let def = definition(json!({
+        "test": "mix",
+        "vars": { "tenant": "acme" },
+        "verify": { "calls": [{ "dependency": "target", "match": { "path": "/mix" }, "count": 1 }] },
+        "mocks": { "target": { "stubs": [{
+            "match": { "method": "POST", "path": "/mix" },
+            "response": { "status": 200, "json": {
+                "label": "{{ vars.tenant }}_{{ request.body.id }}",
+                "n": "{{ request.body.n }}"
+            } }
+        }] } },
+        "steps": [{
+            "name": "mix",
+            "request": { "method": "POST", "path": "/target/mix", "json": { "id": "x", "n": 3 } },
+            "expect": { "status": 200 },
+            "capture": { "label": { "jsonpath": "$.label" }, "n": { "jsonpath": "$.n" } }
+        }]
+    }));
+
+    let result = runner
+        .run_test(&def, &IndexMap::new(), true, None, None)
+        .await;
+    assert_eq!(result.status, TestStatus::Passed, "{result:?}");
+    assert_eq!(result.captures["label"], "acme_x");
+    assert_eq!(result.captures["n"], json!(3));
+}
+
+#[tokio::test]
+async fn settle_recheck_failure_is_not_replaced_by_the_earlier_pass() {
+    // First poll passes, the settle re-check fails (the row appeared), deadline is already over.
+    let store = Arc::new(RecordingStore {
+        fail_from: Some(1),
+        ..Default::default()
+    });
+    let runner = runner(Some(store)).await;
+    let def =
+        definition(json!({"test": "settle", "verify": {"postgres": [{"eventually": "1ms"}]}}));
+    let result = runner
+        .run_test(&def, &IndexMap::new(), true, None, None)
+        .await;
+    assert_eq!(result.status, TestStatus::Failed, "{result:?}");
+}
+
+#[tokio::test]
+async fn repeated_response_headers_are_all_captured() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        assert!(socket.read(&mut buffer).await.unwrap() > 0);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: session=AAA\r\nSet-Cookie: csrf=BBB\r\n\r\nok",
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+    let mut runner = runner(None).await;
+    runner.target_base_url = format!("http://{address}");
+    let def = definition(json!({"test": "cookies", "steps": [{
+        "name": "get", "request": {"method": "GET", "path": "/"},
+        "capture": {
+            "cookies": {"header": "set-cookie"},
+            "session": {"regex": {"on": "header:set-cookie", "pattern": "session=(\\w+)"}}
+        }
+    }]}));
+    let result = runner
+        .run_test(&def, &IndexMap::new(), true, None, None)
+        .await;
+    assert_eq!(result.status, TestStatus::Passed, "{result:?}");
+    assert_eq!(
+        result.captures["cookies"],
+        json!(["session=AAA", "csrf=BBB"])
+    );
+    assert_eq!(result.captures["session"], "AAA");
+    server.abort();
+}
+
+#[tokio::test]
+async fn compound_eventually_durations_poll_and_unreadable_ones_error() {
+    let store = Arc::new(RecordingStore {
+        fail_polls: 1,
+        ..Default::default()
+    });
+    let runner = runner(Some(store)).await;
+    let empty = IndexMap::new();
+    let compound = definition(
+        json!({"test": "compound", "verify": {"postgres": [{"eventually": "1s 500ms"}]}}),
+    );
+    let result = runner.run_test(&compound, &empty, true, None, None).await;
+    assert_eq!(result.status, TestStatus::Passed, "{result:?}");
+    let unreadable =
+        definition(json!({"test": "soon", "verify": {"postgres": [{"eventually": "soon"}]}}));
+    let result = runner.run_test(&unreadable, &empty, true, None, None).await;
+    assert_eq!(result.status, TestStatus::Errored, "{result:?}");
+}
+
+struct LogGate {
+    store: Arc<RecordingStore>,
+    log: std::sync::Mutex<Vec<(String, u32)>>,
+}
+
+impl Gate for LogGate {
+    fn pause(&self, _: &PausePoint, snap: &PauseSnapshot) -> GateDecision {
+        let verifies = self.store.verifies.load(Ordering::SeqCst);
+        self.log
+            .lock()
+            .unwrap()
+            .push((snap.test.to_string(), verifies));
+        GateDecision::Continue
+    }
+}
+
+#[tokio::test]
+async fn shared_lane_tests_never_interleave_with_an_exclusive_test() {
+    let store = Arc::new(RecordingStore {
+        fail_polls: 40,
+        ..Default::default()
+    });
+    let mut runner = runner(Some(store.clone())).await;
+    let gate = Arc::new(LogGate {
+        store: store.clone(),
+        log: Default::default(),
+    });
+    runner.gate = gate.clone();
+    let exclusive = echo_test();
+    let reader =
+        definition(json!({"test": "reader", "verify": {"postgres": [{"eventually": "2s"}]}}));
+    let empty = IndexMap::new();
+
+    let (reader_result, exclusive_result) = tokio::join!(
+        runner.run_test(&reader, &empty, true, None, None),
+        runner.run_test(&exclusive, &empty, true, None, None),
+    );
+
+    assert_eq!(
+        reader_result.status,
+        TestStatus::Passed,
+        "{reader_result:?}"
+    );
+    assert_eq!(
+        exclusive_result.status,
+        TestStatus::Passed,
+        "{exclusive_result:?}"
+    );
+    // The reader polls the store 40+ times under its shared lock; the exclusive test's first
+    // lifecycle point must come after all of that, or the lock is not exclusive.
+    let log = gate.log.lock().unwrap().clone();
+    let first_exclusive = log
+        .iter()
+        .find(|(test, _)| test == "echo")
+        .map(|(_, verifies)| *verifies);
+    assert!(
+        first_exclusive.is_some_and(|verifies| verifies > 40),
+        "lifecycle interleaved: {log:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stub_template_error_is_reported_even_when_unmatched_calls_are_allowed() {
+    let runner = runner(None).await;
+    let def = definition(json!({
+        "test": "broken stub",
+        "mocks": { "target": { "unmatched": "allow", "stubs": [{
+            "match": { "method": "POST", "path": "/broken" },
+            "response": { "status": 200, "json": { "x": "{{ request.body.id | nosuchfilter }}" } }
+        }] } },
+        "verify": { "calls": [{ "dependency": "target", "match": { "path": "/broken" }, "count": 1 }] },
+        "steps": [{
+            "name": "call",
+            "request": { "method": "POST", "path": "/target/broken", "json": { "id": 1 } }
+        }]
+    }));
+
+    let result = runner
+        .run_test(&def, &IndexMap::new(), true, None, None)
+        .await;
+    assert_eq!(result.status, TestStatus::Failed, "{result:?}");
+    assert!(
+        result
+            .verify
+            .failures()
+            .any(|f| f.description.contains("response template failed")),
+        "{result:?}"
     );
 }

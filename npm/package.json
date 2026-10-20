@@ -12,7 +12,8 @@
     "vault": "bin/vault.js"
   },
   "files": [
-    "bin/vault.js"
+    "bin/vault.js",
+    "bin/SHA256SUMS"
   ],
   "engines": {
     "node": ">=18"

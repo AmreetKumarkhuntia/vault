@@ -2,13 +2,13 @@
 name = "demo-target"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8.9"
-chrono = "0.4.45"
 redis = { version = "1.7.0", features = ["tokio-comp", "connection-manager"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }

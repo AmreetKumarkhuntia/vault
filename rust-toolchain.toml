@@ -1,0 +1,5 @@
+# Pinned so local checks, the pre-commit hook and CI compile with the same compiler and
+# clippy. Bump this together with the `toolchain:` lines in .github/workflows/*.yaml.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

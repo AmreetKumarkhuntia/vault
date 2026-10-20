@@ -8,6 +8,10 @@ use vault_dsl::{MockDep, UnmatchedPolicy};
 
 use crate::record::RecordedExchange;
 
+/// Renders one stub response for one request. The engine supplies it so stub
+/// templates follow the same rules as every other template in the test.
+pub type ResponseRenderer = Arc<dyn Fn(&Value, Value) -> Result<Value, String> + Send + Sync>;
+
 /// Per-test mock state: the armed stub table plus the recording log.
 pub struct Session {
     pub key: String,
@@ -16,6 +20,7 @@ pub struct Session {
     pub log: Mutex<Vec<RecordedExchange>>,
     pub seq: AtomicU64,
     pub last_recorded_at_ms: AtomicU64,
+    pub render: ResponseRenderer,
 }
 
 pub struct ArmedDep {
@@ -33,18 +38,34 @@ pub struct ArmedStub {
     pub served: AtomicU32,
 }
 
+impl ArmedStub {
+    /// Claims the next serve slot in one atomic step: check-then-increment
+    /// would let concurrent calls overshoot `times`.
+    pub fn take_slot(&self) -> Option<u32> {
+        self.served
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                match self.spec.times {
+                    Some(t) if n >= t => None,
+                    _ => Some(n + 1),
+                }
+            })
+            .ok()
+    }
+}
+
 impl Session {
     pub fn new(
         key: &str,
         mocks: &IndexMap<String, MockDep>,
         default_unmatched: UnmatchedPolicy,
+        render: ResponseRenderer,
     ) -> Self {
         let deps = mocks
             .iter()
             .map(|(name, dep)| {
                 let armed = ArmedDep {
                     name: name.clone(),
-                    prefix: dep.prefix.clone().unwrap_or_else(|| format!("/{name}")),
+                    prefix: dep.mount(name),
                     unmatched: dep.unmatched.clone(),
                     stubs: dep
                         .stubs
@@ -67,6 +88,7 @@ impl Session {
             log: Mutex::new(Vec::new()),
             seq: AtomicU64::new(0),
             last_recorded_at_ms: AtomicU64::new(0),
+            render,
         }
     }
 
@@ -121,8 +143,10 @@ impl SessionGuard {
         let unmatched_hits = recordings
             .iter()
             .filter(|r| {
-                r.matched_stub.is_none()
-                    && self.session.unmatched_policy(&r.dependency) == UnmatchedPolicy::Fail
+                // A stub whose template failed is reported whatever the unmatched policy says.
+                r.render_error.is_some()
+                    || (r.matched_stub.is_none()
+                        && self.session.unmatched_policy(&r.dependency) == UnmatchedPolicy::Fail)
             })
             .cloned()
             .collect();
@@ -153,17 +177,19 @@ impl Drop for SessionGuard {
 /// Resolve which dependency a request path belongs to; returns the dep name
 /// and the path relative to its prefix.
 pub fn resolve_dep<'s>(session: &'s Session, path: &str) -> Option<(&'s ArmedDep, String)> {
-    for dep in session.deps.values() {
-        if let Some(rest) = path.strip_prefix(&dep.prefix) {
-            if rest.is_empty() {
-                return Some((dep, "/".to_string()));
+    // Longest prefix wins so `/api/billing` is reachable next to `/api`.
+    session
+        .deps
+        .values()
+        .filter_map(|dep| {
+            let rest = path.strip_prefix(&dep.prefix)?;
+            match rest {
+                "" => Some((dep, "/".to_string())),
+                r if r.starts_with('/') => Some((dep, r.to_string())),
+                _ => None,
             }
-            if rest.starts_with('/') {
-                return Some((dep, rest.to_string()));
-            }
-        }
-    }
-    None
+        })
+        .max_by_key(|(dep, _)| dep.prefix.len())
 }
 
 pub fn response_for(stub: &ArmedStub, serve_index: u32) -> Option<Value> {

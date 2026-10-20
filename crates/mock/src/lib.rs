@@ -15,7 +15,7 @@ pub mod verify;
 
 pub use record::{RecordedExchange, RecordedRequest};
 pub use server::MockServer;
-pub use session::{Session, SessionGuard, SessionReport};
+pub use session::{ResponseRenderer, Session, SessionGuard, SessionReport};
 pub use verify::verify_calls;
 
 /// Status served when no stub matches and the dependency's policy is `fail`.

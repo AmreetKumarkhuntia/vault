@@ -490,11 +490,14 @@ fn list_fixtures_marks_later_reset_once_global_plans_as_conditional() {
         &suite,
         "seed:\n  postgres:\n    - sql_file: fixtures/00-global.sql\n",
     );
-    write_test(
-        &suite.join("first.test.yaml"),
-        "first stage",
-        "    - sql_file: fixtures/10-first.sql\n",
-    );
+    fs::write(
+        suite.join("first.test.yaml"),
+        format!(
+            "test: first stage\nvars: {{ broken: \"\" }}\nseed:\n  postgres:\n{}steps: []\n",
+            "    - sql_file: fixtures/10-first.sql\n"
+        ),
+    )
+    .unwrap();
     write_test(
         &suite.join("fallback.test.yaml"),
         "fallback stage",

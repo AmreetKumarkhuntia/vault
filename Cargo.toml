@@ -16,6 +16,7 @@ members = [
 [workspace.package]
 version = "0.8.0" # x-release-version
 edition = "2021"
+rust-version = "1.95" # AtomicU32::try_update
 license = "MIT"
 repository = "https://github.com/AmreetKumarkhuntia/vault"
 

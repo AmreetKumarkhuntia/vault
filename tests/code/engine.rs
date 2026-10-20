@@ -138,3 +138,29 @@ fn json_partial_failure_carries_diffs() {
         other => panic!("wrong kind: {other:?}"),
     }
 }
+
+#[test]
+fn invalid_jsonpath_or_regex_fails_instead_of_matching_nothing() {
+    let ctx = MatchCtx::default();
+    let r = resp(200, json!({"a": {"x": 1}}));
+    let s = spec(json!({"jsonpath": [{"path": "$.a[?(@.x ==)", "absent": true}]}));
+    assert!(!assert_response("s", &s, &r, &ctx).passed());
+    let out = assert_response("s", &spec(json!({"body": {"regex": "("}})), &r, &ctx);
+    assert!(out
+        .failures()
+        .any(|f| f.description.contains("regex is invalid")));
+}
+
+#[test]
+fn repeated_response_headers_match_on_any_element() {
+    let ctx = MatchCtx::default();
+    let mut r = resp(200, json!({}));
+    r.headers = json!({"set-cookie": ["session=abc; Path=/", "csrf=zzz"]});
+    let ok = spec(json!({"headers": {
+        "set-cookie": {"regex": "^csrf="},
+        "Set-Cookie": "session=abc; Path=/"
+    }}));
+    assert!(assert_response("s", &ok, &r, &ctx).passed());
+    let bad = spec(json!({"headers": {"set-cookie": {"regex": "^nope="}}}));
+    assert!(!assert_response("s", &bad, &r, &ctx).passed());
+}

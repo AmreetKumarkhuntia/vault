@@ -37,7 +37,7 @@ impl Drop for TempDir {
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sql_file/suite")
+        .join("../../tests/store-postgres/fixtures/sql_file/suite")
         .canonicalize()
         .expect("SQL fixture suite root should exist")
 }

@@ -2,7 +2,7 @@
 
 > Implementation note: the project shipped under the name **vault** (crates `vault-*`, binary `vault`, config `vault.yaml`). Read `testkit` below as `vault`.
 
-**Status:** Recommended design (synthesis of Designs A/B/C) · **Language:** Rust (tokio) · **Deliverable:** design only, no implementation yet
+**Status:** Recommended design (synthesis of Designs A/B/C) · **Language:** Rust (tokio) · **Deliverable:** design record; shipped as `vault`
 
 ## Conflict resolutions (summary)
 
@@ -104,7 +104,7 @@ defaults:
   mock:    { unmatched: fail }                # fail | respond: {status: 404} | passthrough: <url>
   reset:
     postgres: { mode: truncate, exclude: [schema_migrations] }   # truncate | script:<path> | none
-    redis:    { mode: flushdb }                                  # flushdb | scan: {prefixes: [...]}
+    redis:    { mode: flushdb }                                  # flushdb | { mode: scan, prefixes: [...] }
   verify:  { settle: 500ms }
 report: { json: target/testkit-report.json, junit: target/testkit-junit.xml }
 ```
@@ -298,7 +298,7 @@ verify:
 
 - Engine: **minijinja**, `{{ }}` only — `{% %}` logic blocks rejected in v1 (declarative tests, not programs).
 - Namespaces: `env.*` (allow-listed process env), `vars.*`, `steps.<name>.captures.*` + flat capture shorthand, `mock.<dep>.base_url`, `request.*` (inside mock responses), `test.name`, `run.id`.
-- Builtins: `uuid()`, `now()` / `now('+2h')`, `random_int(a,b)`, filters `b64encode`, `sha256`, `int`, `json`. `now()` is **frozen per test** at SEED so `!near-now` compares against a stable anchor.
+- Builtins: `uuid()`, `now()`, `random_int(a,b)`; filters are minijinja defaults such as `int`. `now()` is **frozen per test** at SEED so `!near-now` compares against a stable anchor.
 - **Typing rule:** a scalar that is exactly one expression (`id: "{{ order_id }}"`) substitutes the native JSON value (number stays number — critical for DB matchers); mixed strings stringify.
 - Render timing: config at load; each step just before firing; `verify:` after all steps. Templates never apply to structural keys (table names, step names), keeping static validation possible.
 
@@ -698,16 +698,16 @@ testkit run [PATTERN]              # all tests, or glob over suite/test names: '
     --tag <t>            repeatable, AND semantics
     --env <name>         environment from vault.yaml (default: local)
     --step               pause at lifecycle boundaries (serial only, requires TTY — else exit 2)
-    --break-at <test:step>
+    --break-at <test:step>           # not implemented
     --shuffle [--seed N] # order-independence audit
     --parallel <N>       # concurrent flows/tests (default 1); run-level reset + global seed, mock/watch tests exclusive
     --report <path>      JSON report (also settable in config)
     --junit <path>       JUnit XML for CI
     --html <path>        Offline HTML bundle with index, flow pages and shared CSS
-    --keep-state-on-failure[=bool]   # default on locally, off in CI profiles
-    --quiet | -v | -vv   # dots | steps expanded | wire logs
+    --keep-state-on-failure[=bool]   # not implemented
+    --quiet | -v | -vv   # -v implemented; --quiet and -vv are not
 testkit list [PATTERN] [--tag t]   # resolved RunPlan, no execution (shares filter code with run)
-testkit validate [--live]          # parse + static checks; --live dry-runs seeds in a rolled-back txn
+testkit validate                   # parse + static checks (--live is not implemented)
 testkit env [--env name]           # print MOCK_*/dependency URLs to export before starting the target
 ```
 
