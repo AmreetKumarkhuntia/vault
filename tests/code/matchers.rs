@@ -134,3 +134,89 @@ fn score_ranks_near_misses() {
     assert_eq!(d1.len(), 1);
     assert_eq!(d1[0].path, "status");
 }
+
+#[test]
+fn regex_never_matches_sql_null() {
+    assert!(!matches_value(
+        &json!({"regex": ".+"}),
+        Some(&Value::Null),
+        &ctx()
+    ));
+}
+
+#[test]
+fn big_integers_compare_exactly() {
+    let a = json!(1_700_000_000_000_000_001_i64);
+    let b = json!(1_700_000_000_000_000_002_i64);
+    assert!(!matches_value(&a, Some(&b), &ctx()));
+    assert!(matches_value(&a, Some(&a), &ctx()));
+    assert!(matches_value(&json!(5), Some(&json!(5.0)), &ctx()));
+}
+
+#[test]
+fn durations_accept_compound_forms_and_days() {
+    assert_eq!(humantime_ms("1m30s"), Some(90_000));
+    assert_eq!(humantime_ms("1d"), Some(86_400_000));
+    assert_eq!(humantime_ms("500ms"), Some(500));
+    assert_eq!(humantime_ms("zzz"), None);
+    // 12 hours before the ctx() anchor (2023-11-14T22:13:20Z).
+    let stale = json!("2023-11-14T10:13:20Z");
+    assert!(matches_value(
+        &json!({"$tag": "near-now", "arg": "1d"}),
+        Some(&stale),
+        &ctx()
+    ));
+    assert!(!matches_value(
+        &json!({"$tag": "near-now", "arg": "5s"}),
+        Some(&stale),
+        &ctx()
+    ));
+    let fresh = json!("2023-11-14T22:13:20Z");
+    assert!(!matches_value(
+        &json!({"$tag": "near-now", "arg": "zzz"}),
+        Some(&fresh),
+        &ctx()
+    ));
+}
+
+#[test]
+fn check_expected_rejects_matchers_that_could_never_match() {
+    assert!(check_expected(&json!({"regex": "("})).is_err());
+    assert!(check_expected(&json!({"regex": "^{{ x }}$"})).is_ok());
+    assert!(check_expected(&json!({"$tag": "not_null"})).is_err());
+    assert!(check_expected(&json!({"$tag": "near-now", "arg": "1m30s"})).is_ok());
+    assert!(check_expected(&json!({"$tag": "near-now", "arg": "soon"})).is_err());
+    assert!(check_expected(&json!({"id": 1, "status": {"regex": "(oops"}})).is_err());
+    assert!(check_expected(&json!({"id": 1, "status": {"one_of": ["a", "b"]}})).is_ok());
+}
+
+#[test]
+fn unsigned_integers_numeric_tolerances_and_shape_checks() {
+    let big = json!(18_446_744_073_709_551_615_u64);
+    assert!(matches_value(&big, Some(&big), &ctx()));
+    assert!(!matches_value(
+        &big,
+        Some(&json!(18_446_744_073_709_551_614_u64)),
+        &ctx()
+    ));
+    // A numeric near-now argument is seconds; this timestamp is 60s before the anchor.
+    let stale = json!("2023-11-14T22:12:20Z");
+    assert!(matches_value(
+        &json!({"$tag": "near-now", "arg": 120}),
+        Some(&stale),
+        &ctx()
+    ));
+    assert!(!matches_value(
+        &json!({"$tag": "near-now", "arg": 30}),
+        Some(&stale),
+        &ctx()
+    ));
+    assert!(check_expected(&json!({"$tag": "one-of", "arg": 5})).is_err());
+    assert!(check_expected(&json!({"one_of": "archived"})).is_err());
+    assert!(check_expected(&json!({"gt": "abc"})).is_err());
+    assert!(check_expected(&json!({"gt": "{{ vars.min }}"})).is_ok());
+    assert!(check_expected(&json!({"$tag": "json"})).is_err());
+    assert!(check_duration(&json!("1m30s")).is_ok());
+    assert!(check_duration(&json!(5)).is_ok());
+    assert!(check_duration(&json!("soon")).is_err());
+}

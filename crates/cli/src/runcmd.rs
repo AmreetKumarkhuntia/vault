@@ -1,12 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anstream::{eprintln, println};
+use futures_util::StreamExt;
 use indexmap::IndexMap;
 use owo_colors::OwoColorize;
 use serde_json::{json, Value};
-use vault_core::{NoopGate, RunResult, TestRunner};
+use vault_core::{NoopGate, RunResult, TestResult, TestRunner};
 use vault_dsl::Suite;
 use vault_mock::MockServer;
 use vault_store::{
@@ -192,6 +193,24 @@ fn prepare_all(
                 None => issues.push(format!("{origin}: unknown store `{kind}` in verify:")),
             }
         }
+        // verify.calls is the other negative assertion; a matcher that can never match
+        // would make `count: 0` pass vacuously.
+        for (i, call) in t.def.verify.calls.iter().enumerate() {
+            let values = [
+                call.match_.path.as_ref(),
+                call.match_.body.as_ref(),
+                call.body.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .chain(call.match_.query.values())
+            .chain(call.match_.headers.values());
+            for value in values {
+                if let Err(e) = vault_store::matchers::check_expected(value) {
+                    issues.push(format!("{origin}: verify.calls[{i}]: {e}"));
+                }
+            }
+        }
 
         if selection.is_none_or(|selection| selection.with_global.contains(&t.path)) {
             for (kind, local) in &local_prepared {
@@ -296,13 +315,19 @@ fn plan<'s>(suite: &'s Suite, pattern: &Option<String>, tags: &[String]) -> Resu
         .filter(|f| name_matches(&f.def.flow) && tags_match(&f.def.tags))
         .collect();
 
+    // A tag filter that deselects a flow must not also hide the flow's tagged members.
+    let selected_members: HashSet<&str> = flows
+        .iter()
+        .flat_map(|f| f.def.stages.iter().map(|s| s.test.as_str()))
+        .collect();
     let standalone: Vec<_> = suite
         .tests
         .iter()
         .filter(|t| tags_match(&t.def.tags))
         .filter(|t| match &matcher {
             // Flow-member tests run inside their flow unless named explicitly.
-            None => !in_flows.contains(t.def.test.as_str()),
+            None if tags.is_empty() => !in_flows.contains(t.def.test.as_str()),
+            None => !selected_members.contains(t.def.test.as_str()),
             Some(m) => m.is_match(&t.def.test),
         })
         .collect();
@@ -634,17 +659,15 @@ pub fn print_env(env: String, suite_dir: String) -> i32 {
             "warning:".yellow().bold()
         );
     }
-    let mut deps: Vec<String> = suite
-        .tests
-        .iter()
-        .flat_map(|t| t.def.mocks.keys().cloned())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    deps.sort();
-    for dep in deps {
+    let mut deps = BTreeMap::new();
+    for t in &suite.tests {
+        for (name, dep) in &t.def.mocks {
+            deps.insert(name.clone(), dep.mount(name));
+        }
+    }
+    for (dep, mount) in deps {
         println!(
-            "export {}_URL=http://{bind}/{dep}",
+            "export {}_URL=http://{bind}{mount}",
             dep.to_uppercase().replace('-', "_")
         );
     }
@@ -921,40 +944,86 @@ async fn run_async<'s>(
     };
 
     let empty = IndexMap::new();
-    let lanes = tokio::sync::Semaphore::new(args.parallel);
-    let (runner, lanes, empty, tests_by_name) = (&runner, &lanes, &empty, &tests_by_name);
-    // FIFO permits start items in plan order; join_all yields them in that
-    // order too, so reports stay deterministic whatever finishes first.
-    let outputs = futures_util::future::join_all(items.iter().map(|item| async move {
-        let _lane = lanes
-            .acquire()
-            .await
-            .expect("lane semaphore is never closed");
-        if runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
-        Some(match item {
-            Item::Test(t) => {
-                let (result, evidence) = runner
-                    .run_test_for_reporting(&t.def, empty, true, None, None, collect_evidence)
-                    .await;
-                (vec![result], vec![evidence])
+    let (runner, empty, tests_by_name) = (&runner, &empty, &tests_by_name);
+    // Items start in plan order with at most `parallel` in flight; each result lands in
+    // its plan slot whatever finishes first, so reports stay deterministic.
+    let mut lanes = futures_util::stream::iter(items.iter().enumerate())
+        .map(|(index, item)| async move {
+            if runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
+                return (index, None);
             }
-            Item::Flow(f) => {
-                let (outcome, evidence) = runner
-                    .run_flow_for_reporting(&f.def, tests_by_name, collect_evidence)
-                    .await;
-                (outcome.results, evidence)
-            }
+            let output = match item {
+                Item::Test(t) => {
+                    let (result, evidence) = runner
+                        .run_test_for_reporting(&t.def, empty, true, None, None, collect_evidence)
+                        .await;
+                    (vec![result], vec![evidence])
+                }
+                Item::Flow(f) => {
+                    let (outcome, evidence) = runner
+                        .run_flow_for_reporting(&f.def, tests_by_name, collect_evidence)
+                        .await;
+                    (outcome.results, evidence)
+                }
+            };
+            (index, Some(output))
         })
-    }))
-    .await;
+        .buffer_unordered(args.parallel.max(1));
+    let mut outputs = Vec::new();
+    outputs.resize_with(items.len(), || None);
+    // --step blocks the main thread at its prompt, so a signal handler could never be
+    // polled there; leave the default Ctrl-C behaviour in place for that mode.
+    let interrupt = async {
+        if args.step {
+            std::future::pending::<()>().await
+        } else {
+            interrupt_signal().await
+        }
+    };
+    tokio::pin!(interrupt);
+    let mut interrupted = false;
+    loop {
+        tokio::select! {
+            next = lanes.next() => match next {
+                Some((index, output)) => outputs[index] = output,
+                None => break,
+            },
+            // A killed run still reports the items that finished; in-flight tests are
+            // dropped and their mock sessions disarm with them.
+            _ = &mut interrupt => {
+                interrupted = true;
+                break;
+            }
+        }
+    }
+    drop(lanes);
+    let unfinished = outputs.iter().filter(|output| output.is_none()).count();
 
     let mut executions = Vec::new();
     for (item_index, output) in outputs.into_iter().enumerate() {
-        let Some((results, evidence)) = output else {
-            continue;
-        };
+        // An item that never finished still appears in the reports, as skipped, so a killed
+        // run cannot be mistaken for a complete green one.
+        let (results, evidence) = output.unwrap_or_else(|| {
+            let reason = if interrupted {
+                "run interrupted"
+            } else {
+                "run aborted"
+            };
+            let skipped = match &items[item_index] {
+                Item::Test(t) => vec![TestResult::skipped(&t.def.test, reason.into())],
+                Item::Flow(f) => f
+                    .def
+                    .stages
+                    .iter()
+                    .map(|stage| {
+                        let mut r = TestResult::skipped(&stage.test, reason.into());
+                        r.flow = Some(f.def.flow.clone());
+                        r
+                    })
+                    .collect(),
+            };
+            (skipped, vec![])
+        });
         let offset = descriptor_offsets[item_index];
         for (index, evidence) in evidence.into_iter().enumerate() {
             for source in &evidence.redaction_sources {
@@ -1019,7 +1088,31 @@ async fn run_async<'s>(
         );
     }
 
+    if interrupted {
+        eprintln!(
+            "{} run interrupted; {unfinished} of {} items did not finish",
+            "interrupted:".yellow().bold(),
+            items.len()
+        );
+        return 130;
+    }
     report_aware_exit_code(run_exit_code, !report_failures.is_empty())
+}
+
+async fn interrupt_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler installs");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn report_source_path(suite: &Suite, path: &Path) -> String {

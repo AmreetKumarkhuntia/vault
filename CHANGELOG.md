@@ -22,10 +22,6 @@
 
 ### Features
 - add YAML-controlled fixture plans (2fb5170)
-
-## Unreleased
-
-### Features
 - add suite-global PostgreSQL seed and deterministic `sql_glob` fixture selection
 - allow declaration-relative, parent-relative, absolute, and symlinked SQL fixture paths
 

@@ -40,6 +40,28 @@ impl StoreDriver for RedisDriver {
             if mode == DocMode::Verify && !m.contains_key("key") && !m.contains_key("pattern") {
                 return Err(ValidationError::new(&path, "needs `key` or `pattern`"));
             }
+            if mode == DocMode::Verify {
+                if m.get("key").is_some_and(|k| !k.is_string()) {
+                    return Err(ValidationError::new(
+                        format!("{path}.key"),
+                        "must be a string",
+                    ));
+                }
+                if let Some(eventually) = m.get("eventually") {
+                    matchers::check_duration(eventually)
+                        .map_err(|e| ValidationError::new(format!("{path}.eventually"), e))?;
+                }
+                for k in ["value", "ttl", "count"] {
+                    if let Some(v) = m.get(k) {
+                        matchers::check_expected(v)
+                            .map_err(|e| ValidationError::new(format!("{path}.{k}"), e))?;
+                    }
+                }
+                if let Some(re) = m.get("regex") {
+                    matchers::check_expected(&json!({ "regex": re }))
+                        .map_err(|e| ValidationError::new(format!("{path}.regex"), e))?;
+                }
+            }
         }
         Ok(())
     }
@@ -49,12 +71,7 @@ impl StoreDriver for RedisDriver {
             .map_err(|e| StoreError::Connection(format!("redis: {e}")))?;
         // FLUSHDB on the default database would wipe unrelated local state;
         // a dedicated logical db (e.g. /15) is the isolation contract.
-        let db_index = cfg
-            .url
-            .rsplit('/')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
+        let db_index = client.get_connection_info().redis_settings().db();
         let allow_db0 = cfg
             .options
             .get("allow_db0")
@@ -99,6 +116,15 @@ impl StateStore for RedisStore {
     }
 
     async fn reset(&self, spec: &StoreDoc) -> Result<(), StoreError> {
+        // `redis: { scan: {...} }` without `mode` must not silently fall through to FLUSHDB.
+        if let Some(bad) = spec.as_object().and_then(|m| {
+            m.keys()
+                .find(|k| !["mode", "prefixes"].contains(&k.as_str()))
+        }) {
+            return Err(StoreError::Harness(format!(
+                "redis reset: unknown key `{bad}` (mode|prefixes)"
+            )));
+        }
         let mut c = self.conn.clone();
         let mode = spec
             .get("mode")
@@ -116,6 +142,11 @@ impl StateStore for RedisStore {
                             .collect()
                     })
                     .unwrap_or_default();
+                if prefixes.is_empty() {
+                    return Err(StoreError::Harness(
+                        "redis reset: `scan` needs a non-empty `prefixes` list".into(),
+                    ));
+                }
                 for prefix in prefixes {
                     let keys: Vec<String> = scan_keys(&mut c, &format!("{prefix}*")).await?;
                     if !keys.is_empty() {
@@ -124,12 +155,15 @@ impl StateStore for RedisStore {
                 }
                 Ok(())
             }
-            _ => redis::cmd("FLUSHDB")
+            "flushdb" => redis::cmd("FLUSHDB")
                 .arg("ASYNC")
                 .query_async::<String>(&mut c)
                 .await
                 .map(|_| ())
                 .map_err(rd_err),
+            other => Err(StoreError::Harness(format!(
+                "redis reset: unknown mode `{other}` (flushdb|scan|none)"
+            ))),
         }
     }
 
@@ -144,7 +178,7 @@ impl StateStore for RedisStore {
             if let Some(set) = entry.get("set") {
                 let key = req_str(set, "key")?;
                 let value = match (set.get("value"), set.get("json")) {
-                    (Some(v), _) => as_text(v),
+                    (Some(v), _) => matchers::compact(v),
                     (None, Some(j)) => j.to_string(),
                     (None, None) => {
                         return Err(StoreError::Harness(format!(
@@ -170,7 +204,7 @@ impl StateStore for RedisStore {
                     })?;
                 let pairs: Vec<(String, String)> = fields
                     .iter()
-                    .map(|(k, v)| (k.clone(), as_text(v)))
+                    .map(|(k, v)| (k.clone(), matchers::compact(v)))
                     .collect();
                 c.hset_multiple::<_, _, _, ()>(&key, &pairs)
                     .await
@@ -181,7 +215,7 @@ impl StateStore for RedisStore {
                 let values: Vec<String> = list
                     .get("values")
                     .and_then(Value::as_array)
-                    .map(|a| a.iter().map(as_text).collect())
+                    .map(|a| a.iter().map(matchers::compact).collect())
                     .unwrap_or_default();
                 c.rpush::<_, _, ()>(&key, values).await.map_err(rd_err)?;
                 receipt.entries.push(format!("redis: RPUSH {key}"));
@@ -205,7 +239,7 @@ impl StateStore for RedisStore {
                 let members: Vec<String> = sadd
                     .get("members")
                     .and_then(Value::as_array)
-                    .map(|a| a.iter().map(as_text).collect())
+                    .map(|a| a.iter().map(matchers::compact).collect())
                     .unwrap_or_default();
                 c.sadd::<_, _, ()>(&key, members).await.map_err(rd_err)?;
                 receipt.entries.push(format!("redis: SADD {key}"));
@@ -257,14 +291,19 @@ impl StateStore for RedisStore {
                 continue;
             }
 
-            let Some(key) = entry.get("key").and_then(Value::as_str) else {
-                continue;
-            };
-            let exists: bool = c.exists(key).await.map_err(rd_err)?;
+            let key = entry.get("key").and_then(Value::as_str).ok_or_else(|| {
+                StoreError::Harness(format!("{yaml_path}: `key` must be a string"))
+            })?;
+            // One TYPE call answers "exists" too, so absent/ttl/type checks never read the value.
+            let key_type: String = redis::cmd("TYPE")
+                .arg(key)
+                .query_async(&mut c)
+                .await
+                .map_err(rd_err)?;
+            let exists = key_type != "none";
 
             if entry.get("absent").and_then(Value::as_bool) == Some(true) {
                 if exists {
-                    let actual = read_key(&mut c, key).await?;
                     out.checks.push(CheckResult::Fail(CheckFailure::new(
                         format!("redis: key `{key}` expected absent but exists"),
                         yaml_path,
@@ -273,7 +312,6 @@ impl StateStore for RedisStore {
                             key: key.to_string(),
                         },
                     )));
-                    let _ = actual;
                 } else {
                     out.push_pass(format!("redis: {key} absent"));
                 }
@@ -290,20 +328,28 @@ impl StateStore for RedisStore {
                 continue;
             }
 
-            let actual = read_key(&mut c, key).await?;
+            for k in ["value", "ttl", "count"] {
+                if let Some(v) = entry.get(k) {
+                    matchers::check_expected(v)
+                        .map_err(|e| StoreError::Harness(format!("{yaml_path}.{k}: {e}")))?;
+                }
+            }
+            let wants_value = ["value", "json_partial", "regex"]
+                .iter()
+                .any(|k| entry.get(*k).is_some());
+            let actual = if wants_value {
+                read_key(&mut c, key, &key_type).await?
+            } else {
+                Value::Null
+            };
             let mut diffs = Vec::new();
 
             if let Some(expected_type) = entry.get("type").and_then(Value::as_str) {
-                let actual_type: String = redis::cmd("TYPE")
-                    .arg(key)
-                    .query_async(&mut c)
-                    .await
-                    .map_err(rd_err)?;
-                if actual_type != expected_type {
+                if key_type != expected_type {
                     diffs.push(FieldDiff {
                         path: "type".into(),
                         expected: json!(expected_type),
-                        actual: json!(actual_type),
+                        actual: json!(key_type),
                     });
                 }
             }
@@ -413,14 +459,17 @@ async fn scan_keys(c: &mut ConnectionManager, pattern: &str) -> Result<Vec<Strin
     }
 }
 
-async fn read_key(c: &mut ConnectionManager, key: &str) -> Result<Value, StoreError> {
-    let key_type: String = redis::cmd("TYPE")
-        .arg(key)
-        .query_async(c)
-        .await
-        .map_err(rd_err)?;
-    let v = match key_type.as_str() {
-        "string" => json!(c.get::<_, String>(key).await.map_err(rd_err)?),
+async fn read_key(
+    c: &mut ConnectionManager,
+    key: &str,
+    key_type: &str,
+) -> Result<Value, StoreError> {
+    let v = match key_type {
+        "string" => {
+            // Values may be binary (msgpack, gzip); decode lossily instead of erroring the test.
+            let bytes: Vec<u8> = c.get(key).await.map_err(rd_err)?;
+            json!(String::from_utf8_lossy(&bytes))
+        }
         "hash" => {
             let map: std::collections::HashMap<String, String> =
                 c.hgetall(key).await.map_err(rd_err)?;
@@ -461,13 +510,6 @@ fn req_str(v: &Value, field: &str) -> Result<String, StoreError> {
         .and_then(Value::as_str)
         .map(String::from)
         .ok_or_else(|| StoreError::Harness(format!("seed redis entry missing `{field}`")))
-}
-
-fn as_text(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
 }
 
 fn rd_err(e: redis::RedisError) -> StoreError {

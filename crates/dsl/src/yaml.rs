@@ -59,7 +59,8 @@ fn yaml_scalar_to_string(v: &Yaml) -> String {
 /// contain a reference: `${env.PG_URL:-postgres://${env.USER}@localhost/db}`.
 pub fn interpolate_env(raw: &str) -> String {
     let mut s = raw.to_string();
-    for _ in 0..8 {
+    // One pass per reference: a fixed cap left later references unexpanded.
+    for _ in 0..raw.matches("${env.").count() {
         let Some(start) = s.rfind("${env.") else {
             break;
         };

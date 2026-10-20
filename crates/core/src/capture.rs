@@ -23,14 +23,9 @@ pub fn capture_value(
             });
     }
     if let Some(header) = &spec.header {
-        return resp
-            .headers
-            .as_object()
-            .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case(header)))
-            .map(|(_, v)| v.clone())
-            .ok_or_else(|| {
-                CoreError::Harness(format!("capture `{name}`: header `{header}` absent"))
-            });
+        return resp.header(header).cloned().ok_or_else(|| {
+            CoreError::Harness(format!("capture `{name}`: header `{header}` absent"))
+        });
     }
     if spec.status == Some(true) {
         return Ok(json!(resp.status));
@@ -41,22 +36,30 @@ pub fn capture_value(
     if let Some(rx) = &spec.regex {
         let re = regex::Regex::new(&rx.pattern)
             .map_err(|e| CoreError::Harness(format!("capture `{name}`: bad regex: {e}")))?;
-        let hay = match rx.on.as_deref() {
-            None | Some("body") => resp.body.clone(),
+        // A repeated header (Set-Cookie) is an array; the first element the regex hits wins.
+        let hays: Vec<String> = match rx.on.as_deref() {
+            None | Some("body") => vec![resp.body.clone()],
             Some(other) => {
                 let header = other.strip_prefix("header:").unwrap_or(other);
-                resp.headers
-                    .as_object()
-                    .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case(header)))
-                    .and_then(|(_, v)| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
+                match resp.header(header) {
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect(),
+                    Some(v) => vec![v.as_str().unwrap_or("").to_string()],
+                    None => vec![String::new()],
+                }
             }
         };
-        return re
-            .captures(&hay)
-            .and_then(|c| c.get(rx.group))
-            .map(|m| Value::String(m.as_str().to_string()))
+        return hays
+            .iter()
+            .find_map(|hay| {
+                re.captures(hay)
+                    .and_then(|c| c.get(rx.group))
+                    .map(|m| m.as_str().to_string())
+            })
+            .map(Value::String)
             .ok_or_else(|| CoreError::Harness(format!("capture `{name}`: regex matched nothing")));
     }
     Err(CoreError::Harness(format!(

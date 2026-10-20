@@ -33,6 +33,8 @@ impl VerifyOutcome {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
+// Value maps are index maps (preserve_order); boxing the failure would ripple through every matcher.
+#[allow(clippy::large_enum_variant)]
 pub enum CheckResult {
     Pass { description: String },
     Fail(CheckFailure),

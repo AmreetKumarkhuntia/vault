@@ -2,12 +2,15 @@
 
 npx wrapper for [vault](https://github.com/AmreetKumarkhuntia/vault) — a black-box HTTP API test harness with YAML-defined HTTP checks, optional Postgres/Redis verification, and a recording dependency mock.
 
-On first run it downloads the matching prebuilt binary from GitHub Releases (sha256-verified) and caches it; after that it's instant.
+On first run it downloads the matching prebuilt binary from GitHub Releases, verifies it against the
+`SHA256SUMS` bundled inside this package, and caches it; after that it's instant. Each download has a
+60-second timeout. Node's built-in `fetch` ignores `HTTPS_PROXY` unless you also set
+`NODE_USE_ENV_PROXY=1` (Node 22.21+/24.5+).
 
 ```sh
 # Installed shorthand:
 npm install --save-dev @thunderkiller/vault
-npx vault --run ./tests/flows
+npx @thunderkiller/vault --run ./tests/flows
 
 # One-off usage:
 npx @thunderkiller/vault --help
@@ -28,7 +31,7 @@ Use the global `--no-color` flag before or after a subcommand for plain CI logs,
 shorthand:
 
 ```sh
-npx vault --no-color --run tests/flows
+npx @thunderkiller/vault --no-color --run tests/flows
 ```
 
 The binary automatically strips ANSI escapes for redirected stdout/stderr. A non-empty `NO_COLOR`
@@ -38,7 +41,7 @@ is treated as unset. Unicode status glyphs remain unchanged, and JSON/JUnit file
 An empty `run` selection exits `2` before connecting to the target, stores, or mock server; `list` remains a successful zero-result inspection. If a requested HTML, JSON, or JUnit report cannot be written, Vault still attempts every other requested report and exits `3`.
 
 Generate an offline report bundle for the current run with
-`npx vault --run ./tests/flows --html target/vault-report.html`. It includes clickable flow stages,
+`npx @thunderkiller/vault --run ./tests/flows --html target/vault-report.html`. It includes clickable flow stages,
 results, lifecycle actions, requests and responses, and failure diffs. Credential fields are
 masked; extend masking with `report.redact` in the suite config. The CLI option overrides
 `report.html` in `vault.yaml`. Open `target/index.html` and copy or publish the whole output

@@ -1,0 +1,9 @@
+test: terminal escape
+tags: [negative, reports]
+
+steps:
+  - name: control characters in body
+    request: { method: GET, path: /escape }
+    expect:
+      status: 200
+      json_partial: { msg: clean }

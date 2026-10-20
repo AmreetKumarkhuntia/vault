@@ -200,3 +200,118 @@ fn env_interpolation_nested_default() {
         "postgres://alice@localhost/db"
     );
 }
+
+#[test]
+fn mapping_order_is_declaration_order() {
+    let t: TestDef = parse_str(
+        "test: x\nvars: { zeta: Z, alpha: A }\nmocks: { zdep: {}, adep: {} }\n",
+        "inline",
+    )
+    .unwrap();
+    let vars: Vec<&str> = t.vars.keys().map(String::as_str).collect();
+    let mocks: Vec<&str> = t.mocks.keys().map(String::as_str).collect();
+    assert_eq!(vars, ["zeta", "alpha"]);
+    assert_eq!(mocks, ["zdep", "adep"]);
+}
+
+#[test]
+fn env_interpolation_expands_every_reference() {
+    std::env::set_var("TK_MANY_QQQ", "v");
+    let raw: String = (0..10)
+        .map(|i| format!("k{i}: ${{env.TK_MANY_QQQ}}\n"))
+        .collect();
+    let out = interpolate_env(&raw);
+    assert!(!out.contains("${env."), "{out}");
+    assert_eq!(out.matches(": v\n").count(), 10);
+}
+
+#[test]
+fn rejects_malformed_call_counts() {
+    let t: TestDef = parse_str(
+        r#"
+test: c
+mocks: { payments: {} }
+verify:
+  calls:
+    - dependency: payments
+      match: { method: POST, path: /x }
+      count: { min: 1 }
+"#,
+        "inline",
+    )
+    .unwrap();
+    let issues = validate_suite(&suite_with(vec![t], vec![]));
+    assert!(
+        issues.iter().any(|i| i.message.contains("`count` must be")),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn flags_undeclared_with_keys_and_empty_flows() {
+    let t: TestDef = parse_str(
+        "test: a\nsteps: [{name: s, request: {method: GET, path: /x}}]",
+        "inline",
+    )
+    .unwrap();
+    let typo: FlowDef = parse_str(
+        "flow: f\nstages:\n  - test: a\n    with: { typo: 1 }\n",
+        "inline",
+    )
+    .unwrap();
+    let empty: FlowDef = parse_str("flow: g\nstages: []\n", "inline").unwrap();
+    let issues = validate_suite(&suite_with(vec![t], vec![typo, empty]));
+    let text = issues
+        .iter()
+        .map(|i| i.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("declares no var `typo`"), "{text}");
+    assert!(text.contains("flow has no stages"), "{text}");
+}
+
+#[test]
+fn flags_duplicate_flows_nested_refs_mount_clashes_and_unanswerable_stubs() {
+    let t: TestDef = parse_str(
+        r#"
+test: a
+vars: { order_id: 1 }
+mocks:
+  one: { prefix: /api, stubs: [{ match: { path: "/p?q=1" } }] }
+  two: { prefix: "/api/", stubs: [] }
+steps:
+  - name: s
+    request: { method: GET, path: /x, json: { ref: "{{ 'x' ~ steps.missing.captures.id }}" } }
+verify:
+  calls:
+    - dependency: one
+      match: { method: POST, path: /p }
+      count: { gte: 3, lte: 1 }
+"#,
+        "inline",
+    )
+    .unwrap();
+    let f1: FlowDef = parse_str("flow: f\nstages: [{test: a}]\n", "inline").unwrap();
+    let f2: FlowDef = parse_str(
+        "flow: f\nstages:\n  - test: a\n    with: { order_id: \"{{ flow.id ~ flow.nothing }}\" }\n",
+        "inline",
+    )
+    .unwrap();
+    let issues = validate_suite(&suite_with(vec![t], vec![f1, f2]));
+    let text = issues
+        .iter()
+        .map(|i| i.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "duplicate flow name `f`",
+        "`flow.nothing` is not exported",
+        "references `steps.missing.captures`",
+        "mount path `/api` is used by another dependency",
+        "needs exactly one non-empty `response` or `responses`",
+        "match.path must not contain a query string",
+        "lower bound does not exceed the upper bound",
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+    }
+}

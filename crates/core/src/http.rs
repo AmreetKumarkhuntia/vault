@@ -15,6 +15,17 @@ pub struct StepResponse {
     pub elapsed: Duration,
 }
 
+impl StepResponse {
+    /// Case-insensitive header lookup; the value is an array when the header repeated.
+    pub fn header(&self, name: &str) -> Option<&Value> {
+        self.headers
+            .as_object()?
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v)
+    }
+}
+
 pub async fn execute_request(
     client: &reqwest::Client,
     base_url: &str,
@@ -70,8 +81,11 @@ pub(crate) async fn execute_request_with_evidence(
         .request(method, &url)
         .timeout(spec.timeout.unwrap_or(default_timeout));
 
+    // reqwest appends headers; a step header must replace a default of the same name.
     for (k, v) in default_headers {
-        req = req.header(k, v);
+        if !spec.headers.keys().any(|s| s.eq_ignore_ascii_case(k)) {
+            req = req.header(k, v);
+        }
     }
     for (k, v) in &spec.headers {
         let rendered = engine.render_value(v)?;
@@ -145,16 +159,9 @@ pub(crate) async fn execute_request_with_evidence(
         .await
         .map_err(|e| CoreError::Http(format!("{url}: {e}")))?;
     let status = resp.status().as_u16();
-    let mut headers = Map::new();
-    for (k, v) in resp.headers() {
-        headers.insert(
-            k.to_string(),
-            Value::String(v.to_str().unwrap_or("").to_string()),
-        );
-    }
-    let report_headers = evidence
-        .collects_sources()
-        .then(|| header_evidence(resp.headers()));
+    // Repeated headers such as Set-Cookie become arrays instead of keeping only the last one.
+    let headers = header_evidence(resp.headers());
+    let report_headers = evidence.collects_sources().then(|| headers.clone());
     if let Some(headers) = &report_headers {
         evidence.source(json!({"headers": headers}));
     }

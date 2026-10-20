@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -64,12 +63,15 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
     let uri = req.uri().clone();
     let path = uri.path().to_string();
     let query = parse_query(uri.query().unwrap_or(""));
-    let headers: Value = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), json!(v.to_str().unwrap_or(""))))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
+    let mut header_map = serde_json::Map::new();
+    for (k, v) in req.headers() {
+        insert_multi(
+            &mut header_map,
+            k.to_string(),
+            json!(v.to_str().unwrap_or("")),
+        );
+    }
+    let headers = Value::Object(header_map);
     let body_bytes = axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024)
         .await
         .unwrap_or_default();
@@ -98,6 +100,7 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
             },
             matched_stub: None,
             responded_status: UNMATCHED_STATUS,
+            render_error: None,
         });
         return plain(
             UNMATCHED_STATUS,
@@ -116,15 +119,12 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
     };
 
     for stub in &dep.stubs {
-        if let Some(times) = stub.spec.times {
-            if stub.served.load(Ordering::SeqCst) >= times {
-                continue;
-            }
-        }
         if !crate::matcher::request_matches(&stub.spec.match_, &recorded) {
             continue;
         }
-        let serve_index = stub.served.fetch_add(1, Ordering::SeqCst);
+        let Some(serve_index) = stub.take_slot() else {
+            continue;
+        };
         let Some(resp) = response_for(stub, serve_index) else {
             continue;
         };
@@ -136,7 +136,31 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
             .as_ref()
             .and_then(|p| crate::matcher::path_matches(p, &recorded.path))
             .unwrap_or_else(|| json!({}));
-        let rendered = render_response(&resp, &recorded, &path_params);
+        let request_ctx = json!({
+            "path": recorded.path,
+            "path_params": path_params,
+            "query": recorded.query,
+            "headers": recorded.headers,
+            "body": recorded.body_json,
+        });
+        let rendered = match (session.render)(&resp, request_ctx) {
+            Ok(rendered) => rendered,
+            Err(detail) => {
+                session.record(RecordedExchange {
+                    seq: 0,
+                    at_unix_ms: now_ms(),
+                    dependency: dep_name.clone(),
+                    request: recorded,
+                    matched_stub: Some(stub.name.clone()),
+                    responded_status: UNMATCHED_STATUS,
+                    render_error: Some(detail.clone()),
+                });
+                return plain(
+                    UNMATCHED_STATUS,
+                    json!({"error": "vault-mock: stub response template failed", "stub": stub.name, "detail": detail}),
+                );
+            }
+        };
 
         let status = rendered["status"].as_u64().unwrap_or(200) as u16;
         session.record(RecordedExchange {
@@ -146,6 +170,7 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
             request: recorded,
             matched_stub: Some(stub.name.clone()),
             responded_status: status,
+            render_error: None,
         });
 
         if let Some(ms) = rendered["latency_ms"].as_u64() {
@@ -161,56 +186,12 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
         request: recorded,
         matched_stub: None,
         responded_status: UNMATCHED_STATUS,
+        render_error: None,
     });
     plain(
         UNMATCHED_STATUS,
         json!({"error": "vault-mock: no stub matched", "dependency": dep_name}),
     )
-}
-
-/// Responses re-render per request so `{{ uuid() }}` and
-/// `{{ request.path_params.* }}` vary per call.
-fn render_response(resp: &Value, req: &RecordedRequest, path_params: &Value) -> Value {
-    let mut env = minijinja::Environment::new();
-    env.add_function("uuid", || uuid::Uuid::new_v4().to_string());
-    env.add_function("now", chrono_now);
-    let ctx = json!({
-        "request": {
-            "path": req.path,
-            "path_params": path_params,
-            "query": req.query,
-            "headers": req.headers,
-            "body": req.body_json,
-        }
-    });
-    render_strings(resp, &env, &ctx)
-}
-
-fn render_strings(v: &Value, env: &minijinja::Environment, ctx: &Value) -> Value {
-    match v {
-        Value::String(s) if s.contains("{{") => match env.render_str(s, ctx) {
-            Ok(out) => Value::String(out),
-            Err(_) => v.clone(),
-        },
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|i| render_strings(i, env, ctx)).collect())
-        }
-        Value::Object(m) => Value::Object(
-            m.iter()
-                .map(|(k, val)| (k.clone(), render_strings(val, env, ctx)))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
-fn chrono_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    format!("{ms}")
 }
 
 fn build_response(rendered: &Value) -> Response {
@@ -222,7 +203,7 @@ fn build_response(rendered: &Value) -> Response {
             if k.eq_ignore_ascii_case("content-type") {
                 has_content_type = true;
             }
-            builder = builder.header(k, v.as_str().unwrap_or(""));
+            builder = builder.header(k, text(v));
         }
     }
     let body = if !rendered["json"].is_null() {
@@ -231,11 +212,20 @@ fn build_response(rendered: &Value) -> Response {
         }
         rendered["json"].to_string()
     } else {
-        rendered["body"].as_str().unwrap_or("").to_string()
+        text(&rendered["body"])
     };
     builder
         .body(Body::from(body))
         .unwrap_or_else(|_| plain(500, json!({"error": "bad stub"})))
+}
+
+/// A lone `{{ expr }}` renders to its native JSON type; headers and bodies need its text.
+fn text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 fn plain(status: u16, body: Value) -> Response {
@@ -250,9 +240,20 @@ fn parse_query(q: &str) -> Value {
     let mut m = serde_json::Map::new();
     for pair in q.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        m.insert(url_decode(k), Value::String(url_decode(v)));
+        insert_multi(&mut m, url_decode(k), Value::String(url_decode(v)));
     }
     Value::Object(m)
+}
+
+/// A repeated key becomes an array instead of silently keeping the last value.
+fn insert_multi(m: &mut serde_json::Map<String, Value>, key: String, val: Value) {
+    match m.get_mut(&key) {
+        Some(Value::Array(items)) => items.push(val),
+        Some(existing) => *existing = Value::Array(vec![existing.take(), val]),
+        None => {
+            m.insert(key, val);
+        }
+    }
 }
 
 fn url_decode(s: &str) -> String {

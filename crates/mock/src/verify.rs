@@ -19,14 +19,24 @@ pub fn verify_calls(
 
     // Serve-time 599s always fail: `unmatched: fail` was the dependency's contract.
     for hit in &report.unmatched_hits {
-        out.checks.push(CheckResult::Fail(CheckFailure::new(
-            format!(
+        let description = match (&hit.render_error, &hit.matched_stub) {
+            (Some(error), stub) => format!(
+                "mock `{}`: stub `{}` matched {} {} but its response template failed: {error}",
+                hit.dependency,
+                stub.as_deref().unwrap_or("?"),
+                hit.request.method,
+                hit.request.path
+            ),
+            _ => format!(
                 "mock `{}` received a request no stub matched (served {}): {} {}",
                 hit.dependency,
                 crate::UNMATCHED_STATUS,
                 hit.request.method,
                 hit.request.path
             ),
+        };
+        out.checks.push(CheckResult::Fail(CheckFailure::new(
+            description,
             format!("mocks.{}", hit.dependency),
             json!("every request to a mocked dependency must match a stub"),
             FailureKind::UnexpectedCall {
@@ -48,14 +58,24 @@ pub fn verify_calls(
 
     let bounds: Vec<(u64, u64)> = calls.iter().map(|c| count_bounds(&c.count)).collect();
 
-    // Lower bounds via bipartite matching: greedy assignment gives false
-    // negatives when expectations overlap on the same recordings.
+    // Mandatory slots first, optional (up to `hi`) second: the matching never
+    // unmatches an earlier slot, so lower bounds outrank optional absorption.
+    // Slots beyond the eligible count could never match, so they are not built.
     let mut slot_owner: Vec<usize> = Vec::new();
     let mut slot_adj: Vec<Vec<usize>> = Vec::new();
-    for (i, (lo, _)) in bounds.iter().enumerate() {
-        for _ in 0..*lo {
+    let mut add_slots = |i: usize, n: u64| {
+        for _ in 0..n {
             slot_owner.push(i);
             slot_adj.push(eligible[i].clone());
+        }
+    };
+    for (i, (lo, _)) in bounds.iter().enumerate() {
+        add_slots(i, (*lo).min(eligible[i].len() as u64));
+    }
+    for (i, (lo, hi)) in bounds.iter().enumerate() {
+        if *hi != u64::MAX {
+            let avail = eligible[i].len() as u64;
+            add_slots(i, (*hi).min(avail).saturating_sub((*lo).min(avail)));
         }
     }
     let slot_match = matchers::max_bipartite(recs.len(), &slot_adj);
@@ -68,29 +88,31 @@ pub fn verify_calls(
             satisfied[slot_owner[slot]] += 1;
         }
     }
+    // An unbounded expectation absorbs whatever is left.
     for (j, rec_claim) in claimed.iter_mut().enumerate() {
-        if rec_claim.is_some() {
-            continue;
-        }
-        for (i, elig) in eligible.iter().enumerate() {
-            if elig.contains(&j) && satisfied[i] < bounds[i].1 {
+        if rec_claim.is_none() {
+            if let Some(i) =
+                (0..calls.len()).find(|&i| bounds[i].1 == u64::MAX && eligible[i].contains(&j))
+            {
                 *rec_claim = Some(i);
                 satisfied[i] += 1;
-                break;
             }
         }
     }
 
     // A bounded expectation absorbs its own overflow so the same recording
     // isn't double-reported as both CountMismatch and UnexpectedCall.
+    // `count: 0` means "never", so it also counts recordings another
+    // expectation already absorbed.
     let mut overflow = vec![0u64; calls.len()];
     for (i, elig) in eligible.iter().enumerate() {
-        if bounds[i].1 == u64::MAX {
+        let hi = bounds[i].1;
+        if hi == u64::MAX {
             continue;
         }
         for &j in elig {
-            if claimed[j].is_none() {
-                claimed[j] = Some(i);
+            if claimed[j].is_none() || hi == 0 {
+                claimed[j].get_or_insert(i);
                 overflow[i] += 1;
             }
         }
@@ -180,7 +202,7 @@ fn count_bounds(count: &Option<Value>) -> (u64, u64) {
                 lo = lo.max(v);
             }
             if let Some(v) = m.get("gt").and_then(Value::as_u64) {
-                lo = lo.max(v + 1);
+                lo = lo.max(v.saturating_add(1));
             }
             if let Some(v) = m.get("lte").and_then(Value::as_u64) {
                 hi = hi.min(v);

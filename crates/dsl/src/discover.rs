@@ -39,9 +39,16 @@ pub fn discover(root: &Path) -> Result<Suite, DslError> {
     for entry in WalkDir::new(root)
         .sort_by_file_name()
         .into_iter()
-        .filter_entry(|e| e.file_name() != "fixtures")
-        .filter_map(Result::ok)
+        .filter_entry(|e| e.depth() == 0 || e.file_name() != "fixtures")
     {
+        // An unreadable directory must fail the load, not silently drop its tests.
+        let entry = entry.map_err(|e| DslError::Io {
+            path: e
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            source: e.into(),
+        })?;
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;

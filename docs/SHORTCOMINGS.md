@@ -22,7 +22,7 @@ reason, fix, pull request, and first fixed release remain traceable.
 | ---: | --- | --- | --- | --- |
 | 1 | VLT-001 | Done | XS | Empty test selections exit successfully |
 | 2 | VLT-002 | Done | XS | Requested report write failures do not fail the run |
-| 3 | VLT-013 | In progress | M | SQL fixture selection is limited to contained single files |
+| 3 | VLT-013 | Done | M | SQL fixture selection is limited to contained single files |
 | 4 | VLT-003 | Open | S | Missing environment values are resolved leniently |
 | 5 | VLT-004 | Open | S | Static validation is not environment-aware |
 | 6 | VLT-005 | Open | M | Write-capable tests have no enforced safety gate |
@@ -82,10 +82,9 @@ shown together.
 
 ## VLT-013: SQL fixture selection is limited to contained single files
 
-**Implementation in progress.** This branch adds suite-global seed, declaration-relative and
-filesystem-wide exact paths, deterministic SQL globs, an inspectable frozen fixture plan, reset-aware
-flow behavior, and external/live/demo coverage. The item remains in progress until all checks pass
-in CI and the change is merged.
+**Completed.** Shipped in v0.5.0 (commit `2fb5170`, YAML-controlled fixture plans): suite-global
+seed, declaration-relative and filesystem-wide exact paths, deterministic SQL globs, an inspectable
+frozen fixture plan, reset-aware flow behavior, and external/live/demo coverage.
 
 **Problem.** PostgreSQL seed supports one `sql_file` at a time, resolves it from the suite root,
 and rejects paths outside that root. Suites cannot declare a reusable global baseline, select an

@@ -28,7 +28,7 @@ fn print_test(test: &TestResult, verbose: bool) {
     let flow_prefix = test
         .flow
         .as_deref()
-        .map(|f| format!("[{f}] "))
+        .map(|f| format!("[{}] ", plain(f)))
         .unwrap_or_default();
     match test.status {
         TestStatus::Passed => {
@@ -36,7 +36,7 @@ fn print_test(test: &TestResult, verbose: bool) {
                 "{} {}{} ({}ms)",
                 "✓".green().bold(),
                 flow_prefix,
-                test.name,
+                plain(&test.name),
                 test.duration_ms
             );
             if verbose {
@@ -44,7 +44,7 @@ fn print_test(test: &TestResult, verbose: bool) {
                     println!(
                         "    {} step {} ({} attempts)",
                         "✓".green(),
-                        step.name,
+                        plain(&step.name),
                         step.attempts
                     );
                 }
@@ -55,8 +55,8 @@ fn print_test(test: &TestResult, verbose: bool) {
                 "{} {}{} — {}",
                 "○".dimmed(),
                 flow_prefix,
-                test.name.dimmed(),
-                test.skip_reason.as_deref().unwrap_or("skipped").dimmed()
+                plain(&test.name).dimmed(),
+                plain(test.skip_reason.as_deref().unwrap_or("skipped")).dimmed()
             );
         }
         TestStatus::Errored => {
@@ -64,11 +64,11 @@ fn print_test(test: &TestResult, verbose: bool) {
                 "{} {}{} ({}ms)",
                 "⚠".yellow().bold(),
                 flow_prefix,
-                test.name,
+                plain(&test.name),
                 test.duration_ms
             );
             if let Some(e) = &test.error {
-                println!("    {}", e.yellow());
+                println!("    {}", plain(e).yellow());
             }
         }
         TestStatus::Failed => {
@@ -76,7 +76,7 @@ fn print_test(test: &TestResult, verbose: bool) {
                 "{} {}{} ({}ms)",
                 "✗".red().bold(),
                 flow_prefix,
-                test.name,
+                plain(&test.name),
                 test.duration_ms
             );
             for step in &test.steps {
@@ -86,7 +86,7 @@ fn print_test(test: &TestResult, verbose: bool) {
                 } else {
                     "✗".red().to_string()
                 };
-                println!("    {glyph} step {}", step.name);
+                println!("    {glyph} step {}", plain(&step.name));
                 for f in step.checks.failures() {
                     print_failure(f, 6);
                 }
@@ -108,17 +108,17 @@ fn print_failure(f: &CheckFailure, indent: usize) {
     println!(
         "{pad}{} {}{}",
         "✗".red(),
-        f.description.red(),
+        plain(&f.description).red(),
         attempts.dimmed()
     );
-    println!("{pad}  {} {}", "at".dimmed(), f.yaml_path.dimmed());
+    println!("{pad}  {} {}", "at".dimmed(), plain(&f.yaml_path).dimmed());
 
     match &f.kind {
         FailureKind::ValueMismatch { diffs } if !diffs.is_empty() => {
             let mut table = diff_table();
             for d in diffs.iter().take(10) {
                 table.add_row(vec![
-                    Cell::new(&d.path),
+                    Cell::new(plain(&d.path)),
                     Cell::new(compact(&d.expected)),
                     Cell::new(compact(&d.actual)),
                 ]);
@@ -145,15 +145,15 @@ fn print_failure(f: &CheckFailure, indent: usize) {
             println!("{pad}  closest recorded call (score {:.2}):", best.score);
             println!(
                 "{pad}    {} {} {}",
-                method,
-                path,
+                plain(method),
+                plain(path),
                 truncate(body, 200).dimmed()
             );
             if !best.diffs.is_empty() {
                 let mut table = diff_table();
                 for d in best.diffs.iter().take(10) {
                     table.add_row(vec![
-                        Cell::new(&d.path),
+                        Cell::new(plain(&d.path)),
                         Cell::new(compact(&d.expected)),
                         Cell::new(compact(&d.actual)),
                     ]);
@@ -175,7 +175,7 @@ fn print_failure(f: &CheckFailure, indent: usize) {
                     let matched = !best.diffs.iter().any(|d| d.path == *col);
                     let mark = if matched { "✓" } else { "✗" };
                     table.add_row(vec![
-                        Cell::new(col),
+                        Cell::new(plain(col)),
                         Cell::new(describe(want)),
                         Cell::new(format!("{} {}", compact(&got), mark)),
                     ]);
@@ -198,8 +198,8 @@ fn print_failure(f: &CheckFailure, indent: usize) {
                 .unwrap_or("");
             println!(
                 "{pad}  {} {} {}",
-                method,
-                path,
+                plain(method),
+                plain(path),
                 truncate(body, 200).dimmed()
             );
         }
@@ -208,11 +208,11 @@ fn print_failure(f: &CheckFailure, indent: usize) {
             println!("{pad}  row: {}", truncate(&actual.to_string(), 300));
         }
         FailureKind::CountMismatch { expected, actual } => {
-            println!("{pad}  expected {expected}, got {actual}");
+            println!("{pad}  expected {}, got {actual}", plain(expected));
         }
         FailureKind::OrderViolation { interleaving } => {
             for (name, seq) in interleaving {
-                println!("{pad}  seq {seq}: {name}");
+                println!("{pad}  seq {seq}: {}", plain(name));
             }
         }
         _ => {}
@@ -245,7 +245,22 @@ fn describe(v: &serde_json::Value) -> String {
     truncate(&vault_store::matchers::describe(v), 60)
 }
 
+// Target- and store-controlled text reaches the terminal: a raw ESC or CR could clear the
+// screen, overwrite a result line or write the clipboard (OSC 52).
+fn plain(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && !matches!(c, '\n' | '\t') {
+                '\u{fffd}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn truncate(s: &str, n: usize) -> String {
+    let s = &plain(s);
     if s.chars().count() <= n {
         s.to_string()
     } else {

@@ -8,13 +8,16 @@ These instructions apply to the entire repository.
 - Do not add `#[cfg(test)]`, `#[test]`, namespaced test attributes such as
   `#[tokio::test]`, or inline `mod tests` modules under `crates/**/src/` or
   `examples/**/src/`.
-- Put every Rust test in a dedicated `tests/` directory. Use
-  `crates/<crate>/tests/` for crate or binary integration tests and
-  `tests/code/` for cross-crate harness tests.
+- Put every Rust test under the top-level `tests/` directory: `tests/<crate>/`
+  for a crate's integration tests, registered as `[[test]]` targets in that
+  crate's `Cargo.toml` (this keeps `cargo test -p <crate>` and
+  `CARGO_BIN_EXE_*` working), and `tests/code/` for cross-crate harness tests.
+  A file without its `[[test]]` entry never runs; `scripts/check-tests-registered.sh`
+  (run by CI and the pre-commit hook) catches that.
 - Exercise behavior through public APIs or a compiled executable. CLI tests
   must launch the compiled binary as a child process and use an isolated
   temporary working directory rather than a production source directory.
-- Keep test-only fixtures and support data under the relevant `tests/`
+- Keep test-only fixtures and support data under the relevant `tests/<crate>/`
   directory.
 - If behavior is difficult to test externally, improve the public boundary or
   extract reusable production logic instead of adding inline tests.

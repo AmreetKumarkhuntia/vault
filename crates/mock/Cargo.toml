@@ -2,13 +2,13 @@
 name = "vault-mock"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
 axum = "0.8.9"
 indexmap = "2.14.2"
-minijinja = "2.24.0"
 parking_lot = "0.12.5"
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -17,5 +17,10 @@ vault-dsl = { path = "../dsl" }
 vault-store = { path = "../store" }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
-tracing = "0.1.44"
-uuid = { version = "1.26.1", features = ["v4"] }
+
+# Integration tests live under the workspace tests/ directory; registering them here keeps
+# `cargo test -p` and CARGO_BIN_EXE_* working for this crate.
+
+[[test]]
+name = "server"
+path = "../../tests/mock/server.rs"

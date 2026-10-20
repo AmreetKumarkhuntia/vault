@@ -33,14 +33,10 @@ pub fn assert_response(
     }
 
     for (name, matcher) in &spec.headers {
-        let actual = resp
-            .headers
-            .as_object()
-            .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)))
-            .map(|(_, v)| v);
+        let actual = resp.header(name);
         let ok = match matcher.as_str() {
             Some("absent") => actual.is_none(),
-            _ => matchers::matches_value(matcher, actual, ctx),
+            _ => matchers::matches_any(matcher, actual, ctx),
         };
         if ok {
             out.push_pass(format!("{step}: header {name}"));
@@ -89,10 +85,19 @@ pub fn assert_response(
     }
 
     for (i, assert) in spec.jsonpath.iter().enumerate() {
-        let located = JsonPath::parse(&assert.path)
-            .ok()
-            .map(|p| p.query(&resp.body_json).all())
-            .unwrap_or_default();
+        let located = match JsonPath::parse(&assert.path) {
+            Ok(path) => path.query(&resp.body_json).all(),
+            // An unparseable path must fail the check; "no match" would satisfy `absent`.
+            Err(e) => {
+                out.checks.push(fail(
+                    format!("{step}: jsonpath `{}` is invalid: {e}", assert.path),
+                    at(&format!("jsonpath[{i}]")),
+                    json!({"path": assert.path}),
+                    vec![],
+                ));
+                continue;
+            }
+        };
         let actual = located.first().copied();
         let ops: Value = assert
             .ops
@@ -117,21 +122,28 @@ pub fn assert_response(
     }
 
     if let Some(body_spec) = &spec.body {
+        let mut why = String::new();
         let ok = match body_spec {
             Value::String(s) => &resp.body == s,
-            Value::Object(m) => m
+            Value::Object(m) => match m
                 .get("regex")
                 .and_then(Value::as_str)
-                .and_then(|p| regex::Regex::new(p).ok())
-                .map(|re| re.is_match(&resp.body))
-                .unwrap_or(false),
+                .map(regex::Regex::new)
+            {
+                Some(Ok(re)) => re.is_match(&resp.body),
+                Some(Err(e)) => {
+                    why = format!(": regex is invalid: {e}");
+                    false
+                }
+                None => false,
+            },
             _ => false,
         };
         if ok {
             out.push_pass(format!("{step}: body"));
         } else {
             out.checks.push(fail(
-                format!("{step}: raw body mismatch"),
+                format!("{step}: raw body mismatch{why}"),
                 at("body"),
                 body_spec.clone(),
                 vec![diff(

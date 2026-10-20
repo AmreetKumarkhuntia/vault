@@ -1,0 +1,11 @@
+#!/bin/sh
+# Setting core.hooksPath for this repo hides a global or system hook directory (for
+# example a secret scanner); run its hook of the same name after ours.
+hook="$1"; shift
+dir="$(git config --global --type=path core.hooksPath 2>/dev/null \
+    || git config --system --type=path core.hooksPath 2>/dev/null || true)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
+if [ -n "$dir" ] && [ -x "$dir/$hook" ] && [ "$(cd "$dir" && pwd -P)" != "$here" ]; then
+    exec "$dir/$hook" "$@"
+fi
+exit 0

@@ -29,8 +29,6 @@ const OPERATOR_KEYS: &[&str] = &[
     "json_partial",
     "starts_with",
     "ends_with",
-    "under",
-    "over",
 ];
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -49,6 +47,14 @@ pub fn is_matcher_map(v: &Value) -> bool {
 
 pub fn is_tag_matcher(v: &Value) -> bool {
     matches!(v, Value::Object(m) if m.contains_key("$tag"))
+}
+
+/// Like `matches_value`, but a repeated header or query key arrives as an array, and then
+/// any element may satisfy the expectation.
+pub fn matches_any(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -> bool {
+    matches_value(expected, actual, ctx)
+        || matches!(actual, Some(Value::Array(items))
+            if items.iter().any(|item| matches_value(expected, Some(item), ctx)))
 }
 
 /// Match one expected value against one (possibly absent) actual value.
@@ -95,7 +101,7 @@ pub fn describe(expected: &Value) -> String {
     compact(expected)
 }
 
-fn compact(v: &Value) -> String {
+pub fn compact(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -122,11 +128,13 @@ fn match_tag(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -> bool {
                     .as_str()
                     .is_some_and(|s| parse_timestamp(s).is_some()),
                 "near-now" => {
-                    let tol_ms = arg
-                        .and_then(|a| a.as_str())
-                        .and_then(humantime_ms)
-                        .unwrap_or(5_000);
-                    near_now(actual, ctx.anchor_unix_ms, tol_ms)
+                    // No arg means 5s; an arg we cannot read must fail, not shrink to 5s.
+                    let tol_ms = match arg {
+                        None => Some(5_000),
+                        Some(Value::Number(n)) => n.as_f64().map(|secs| (secs * 1000.0) as i64),
+                        Some(a) => a.as_str().and_then(humantime_ms),
+                    };
+                    tol_ms.is_some_and(|tol| near_now(actual, ctx.anchor_unix_ms, tol))
                 }
                 "json" => {
                     // containment: the actual (string or value) must contain arg
@@ -149,11 +157,11 @@ fn match_operators(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -> 
         let ok = match op.as_str() {
             "absent" => {
                 let want_absent = arg.as_bool().unwrap_or(true);
-                continue_if(want_absent == actual.is_none())
+                want_absent == actual.is_none()
             }
             "exists" => {
                 let want = arg.as_bool().unwrap_or(true);
-                continue_if(want == actual.is_some())
+                want == actual.is_some()
             }
             _ => {
                 let Some(actual) = actual else { return false };
@@ -208,10 +216,6 @@ fn match_operators(expected: &Value, actual: Option<&Value>, ctx: &MatchCtx) -> 
     true
 }
 
-fn continue_if(b: bool) -> bool {
-    b
-}
-
 fn str_pair(a: &Value, b: &Value) -> Option<(String, String)> {
     Some((a.as_str()?.to_string(), b.as_str()?.to_string()))
 }
@@ -222,6 +226,8 @@ fn regex_match(pattern: &Value, actual: &Value) -> bool {
     };
     let hay = match actual {
         Value::String(s) => s.clone(),
+        // SQL NULL would stringify to "null" and satisfy loose patterns like `.+`.
+        Value::Null => return false,
         other => other.to_string(),
     };
     regex::Regex::new(p)
@@ -241,6 +247,15 @@ pub fn type_name(v: &Value) -> &'static str {
 }
 
 fn scalar_eq(a: &Value, b: &Value) -> bool {
+    // Exact first: 64-bit ids past 2^53 collide once rounded through f64.
+    if let (Value::Number(x), Value::Number(y)) = (a, b) {
+        if let (Some(x), Some(y)) = (x.as_i64(), y.as_i64()) {
+            return x == y;
+        }
+        if let (Some(x), Some(y)) = (x.as_u64(), y.as_u64()) {
+            return x == y;
+        }
+    }
     if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
         return (x - y).abs() < f64::EPSILON * x.abs().max(y.abs()).max(1.0);
     }
@@ -340,18 +355,11 @@ fn near_now(actual: &Value, anchor_ms: i64, tol_ms: i64) -> bool {
     actual_ms.is_some_and(|a| (a - anchor).abs() <= tol_ms)
 }
 
+/// Durations in humantime syntax (`500ms`, `5s`, `1m30s`, `2 min`, `1d`), in milliseconds.
 pub fn humantime_ms(s: &str) -> Option<i64> {
-    let s = s.trim();
-    let (num, unit) = s.split_at(s.find(|c: char| c.is_alphabetic()).unwrap_or(s.len()));
-    let n: f64 = num.trim().parse().ok()?;
-    let mult = match unit.trim() {
-        "ms" => 1.0,
-        "s" | "sec" | "" => 1000.0,
-        "m" | "min" => 60_000.0,
-        "h" => 3_600_000.0,
-        _ => return None,
-    };
-    Some((n * mult) as i64)
+    humantime::parse_duration(s.trim())
+        .ok()
+        .map(|d| d.as_millis() as i64)
 }
 
 /// Containment check ("json_partial"): every leaf in `expected` must be
@@ -568,4 +576,72 @@ pub fn max_bipartite(n_right: usize, adj: &[Vec<usize>]) -> Vec<Option<usize>> {
         }
     }
     match_left
+}
+
+const TAGS: &[&str] = &[
+    "absent", "any", "null", "not-null", "number", "uuid", "iso8601", "near-now", "json", "one-of",
+];
+
+/// Reject expected values that could never match: a regex that does not compile, an unknown
+/// tag or an unreadable `!near-now` tolerance. Left unchecked they evaluate to "no match", which
+/// silently satisfies `expect_absent`. Strings holding `{{ }}` are skipped; they render later.
+pub fn check_expected(v: &Value) -> Result<(), String> {
+    let Value::Object(m) = v else {
+        if let Value::Array(items) = v {
+            return items.iter().try_for_each(check_expected);
+        }
+        return Ok(());
+    };
+    if is_tag_matcher(v) {
+        let tag = m.get("$tag").and_then(Value::as_str).unwrap_or("");
+        if !TAGS.contains(&tag) {
+            return Err(format!("unknown tag `!{tag}`"));
+        }
+        match (tag, m.get("arg")) {
+            ("near-now", None | Some(Value::Number(_))) => {}
+            ("near-now", Some(Value::String(s)))
+                if s.contains("{{") || humantime_ms(s).is_some() => {}
+            ("near-now", Some(other)) => {
+                return Err(format!("!near-now: cannot read duration {other}"))
+            }
+            ("one-of", Some(Value::Array(_))) => {}
+            ("one-of", _) => return Err("!one-of needs a list argument".into()),
+            ("json", None) => return Err("!json needs an argument".into()),
+            _ => {}
+        }
+        return Ok(());
+    }
+    if is_matcher_map(v) {
+        let templated = |x: &Value| x.as_str().is_some_and(|s| s.contains("{{"));
+        match m.get("regex") {
+            None => {}
+            Some(Value::String(p)) if p.contains("{{") => {}
+            Some(Value::String(p)) => {
+                regex::Regex::new(p).map_err(|e| format!("regex `{p}`: {e}"))?;
+            }
+            Some(other) => return Err(format!("regex: pattern must be a string, got {other}")),
+        }
+        if let Some(arg) = m.get("one_of") {
+            if !arg.is_array() && !templated(arg) {
+                return Err("one_of needs a list".into());
+            }
+        }
+        for op in ["gt", "gte", "lt", "lte"] {
+            if let Some(arg) = m.get(op) {
+                if !arg.is_number() && !templated(arg) {
+                    return Err(format!("{op} needs a number, got {arg}"));
+                }
+            }
+        }
+    }
+    m.values().try_for_each(check_expected)
+}
+
+/// A duration field (`eventually:`) that cannot be read fails at run time; catch it statically.
+pub fn check_duration(v: &Value) -> Result<(), String> {
+    match v {
+        Value::Number(_) => Ok(()),
+        Value::String(s) if s.contains("{{") || humantime_ms(s).is_some() => Ok(()),
+        other => Err(format!("cannot read duration {other}")),
+    }
 }

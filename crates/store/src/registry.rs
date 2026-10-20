@@ -23,8 +23,4 @@ impl StoreRegistry {
     pub fn get(&self, kind: &str) -> Option<Arc<dyn StoreDriver>> {
         self.drivers.get(kind).cloned()
     }
-
-    pub fn kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.drivers.keys().copied()
-    }
 }

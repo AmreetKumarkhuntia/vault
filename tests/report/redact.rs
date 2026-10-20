@@ -492,3 +492,119 @@ fn long_credential_preview_masking_reaches_json_and_junit_without_changing_match
     assert_eq!(run.tests[0].steps[0].response.as_ref().unwrap().status, 200);
     assert_eq!(run.exit_code(), 1);
 }
+
+#[test]
+fn masking_thousands_of_distinct_credentials_stays_fast() {
+    let mut redactor = Redactor::new(&ReportRedaction::default()).unwrap();
+    let records: Vec<Value> = (0..6_000)
+        .map(|i| {
+            let token = format!("tok-{i:06}-xxxxxxxx");
+            // The echo in a plain field is what forces the learned-secret pass over every string.
+            json!({"id": i, "access_token": token, "note": format!("echoed {token} back")})
+        })
+        .collect();
+    let mut value = json!({"body_json": records, "error": "last seen tok-000042-xxxxxxxx"});
+
+    let started = std::time::Instant::now();
+    redactor.discover(&value);
+    redactor.sanitize(&mut value);
+    let elapsed = started.elapsed();
+
+    let rendered = value.to_string();
+    assert!(!rendered.contains("tok-"), "{}", &rendered[..200]);
+    assert_eq!(rendered.matches("[REDACTED]").count(), 12_001);
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+}
+
+#[test]
+fn compound_credential_names_are_masked_by_default() {
+    let mut redactor = Redactor::new(&ReportRedaction::default()).unwrap();
+    let mut value = json!({
+        "body_json": {
+            "current_password": "CURRENT_SENTINEL",
+            "new_password": "NEW_SENTINEL",
+            "db_password": "DB_SENTINEL",
+            "userToken": "USER_SENTINEL",
+            "max_tokens": 4096,
+            "token_type": "Bearer"
+        },
+        "headers": {"X-Vault-Token": "VAULT_SENTINEL", "content-type": "application/json"},
+        "error": "retry with new_password=zzz123456 and max_tokens=4096"
+    });
+
+    redactor.discover(&value);
+    redactor.sanitize(&mut value);
+
+    let rendered = value.to_string();
+    assert!(!rendered.contains("SENTINEL"), "{rendered}");
+    assert!(!rendered.contains("zzz123456"), "{rendered}");
+    assert_eq!(value["body_json"]["max_tokens"], json!(4096));
+    assert_eq!(value["body_json"]["token_type"], json!("Bearer"));
+    assert_eq!(value["headers"]["content-type"], json!("application/json"));
+    assert_eq!(
+        value["error"],
+        json!("retry with new_password=[REDACTED] and max_tokens=4096")
+    );
+}
+
+#[test]
+fn userinfo_in_unparseable_urls_is_masked() {
+    let mut redactor = Redactor::new(&ReportRedaction::default()).unwrap();
+    // Port out of range: `url::Url::parse` rejects it, so the structured path cannot mask it.
+    let mut value = json!("connect failed https://svc:s3cr3tpass@db.internal:99999999/x?a=1");
+
+    redactor.sanitize(&mut value);
+
+    assert_eq!(
+        value,
+        json!("connect failed https://[REDACTED]@db.internal:99999999/x?a=1")
+    );
+}
+
+#[test]
+fn step_names_that_end_in_a_secret_word_do_not_hide_report_text() {
+    let mut run = RunResult {
+        schema_version: 1,
+        environment: "local".into(),
+        duration_ms: 1,
+        tests: vec![TestResult {
+            name: "login".into(),
+            status: TestStatus::Failed,
+            skip_reason: None,
+            error: None,
+            steps: vec![StepResult {
+                name: "reset_password".into(),
+                status: TestStatus::Failed,
+                response: None,
+                checks: VerifyOutcome {
+                    checks: vec![
+                        CheckResult::Pass {
+                            description: "get_token: status 200".into(),
+                        },
+                        CheckResult::Fail(CheckFailure {
+                            description: "reset_password: json_partial mismatch".into(),
+                            yaml_path: "steps.reset_password.expect.json_partial".into(),
+                            expected: json!({"message": "Updated successfully"}),
+                            kind: FailureKind::ValueMismatch { diffs: vec![] },
+                            near_misses: vec![],
+                            attempts: 1,
+                            elapsed_ms: 1,
+                        }),
+                    ],
+                },
+                attempts: 1,
+            }],
+            verify: VerifyOutcome::default(),
+            seed_receipts: vec![],
+            captures: Default::default(),
+            recorded_calls: vec![],
+            duration_ms: 1,
+            flow: None,
+        }],
+    };
+    let mut redactor = Redactor::new(&ReportRedaction::default()).unwrap();
+    redactor.sanitize_run(&mut run);
+    let rendered = serde_json::to_string(&run).unwrap();
+    assert!(rendered.contains("get_token: status 200"), "{rendered}");
+    assert!(rendered.contains("Updated successfully"), "{rendered}");
+}

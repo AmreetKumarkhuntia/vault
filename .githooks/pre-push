@@ -1,0 +1,3 @@
+#!/bin/sh
+# No repo checks on push (CI runs the tests); only keep the machine-wide hook in the chain.
+exec "$(dirname "$0")/chain-system-hook" pre-push "$@"

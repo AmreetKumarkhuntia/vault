@@ -70,6 +70,7 @@ fn rec(seq: u64, dep: &str, method: &str, path: &str, body: Value) -> RecordedEx
         request: req(method, path, body),
         matched_stub: Some("s".into()),
         responded_status: 200,
+        render_error: None,
     }
 }
 
@@ -209,4 +210,132 @@ fn ordered_group_checks_subsequence() {
         &MatchCtx::default(),
     );
     assert!(out.passed());
+}
+
+#[test]
+fn count_zero_sees_recordings_absorbed_by_a_broader_expectation() {
+    let r = report(
+        vec![rec(
+            0,
+            "email",
+            "POST",
+            "/send",
+            json!({"template": "welcome"}),
+        )],
+        &["email"],
+    );
+    let some_email = expect("some email", "email", "POST", "/send", json!({"gte": 1}));
+    let mut no_welcome = expect("no welcome", "email", "POST", "/send", json!(0));
+    no_welcome.body = Some(json!({"json_partial": {"template": "welcome"}}));
+    let out = verify_calls(
+        &r,
+        &[some_email, no_welcome],
+        &[],
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
+    let fails: Vec<_> = out.failures().collect();
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    assert!(matches!(fails[0].kind, FailureKind::CountMismatch { .. }));
+}
+
+#[test]
+fn bounded_optional_expectations_do_not_steal_from_exact_ones() {
+    let r = report(
+        vec![
+            rec(0, "email", "POST", "/send", json!({"template": "welcome"})),
+            rec(1, "email", "POST", "/send", json!({"template": "receipt"})),
+        ],
+        &["email"],
+    );
+    let one_mail = expect("one mail", "email", "POST", "/send", json!(1));
+    let mut welcome = expect(
+        "welcome optional",
+        "email",
+        "POST",
+        "/send",
+        json!({"lte": 1}),
+    );
+    welcome.body = Some(json!({"json_partial": {"template": "welcome"}}));
+    let out = verify_calls(
+        &r,
+        &[one_mail, welcome],
+        &[],
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
+    assert!(out.passed(), "{:?}", out.failures().collect::<Vec<_>>());
+}
+
+#[test]
+fn header_and_query_matchers_share_one_rule() {
+    let spec: MatchSpec = serde_json::from_value(json!({
+        "headers": { "x-count": 3, "x-debug": { "$tag": "absent" } },
+        "query": { "page": { "gte": 1 }, "id": "1" }
+    }))
+    .unwrap();
+    let mut request = req("GET", "/x", json!({}));
+    request.headers = json!({ "x-count": "3" });
+    request.query = json!({ "page": "2", "id": ["2", "1"] });
+    assert!(request_matches(&spec, &request));
+    request.headers = json!({ "x-count": "3", "x-debug": "1" });
+    assert!(!request_matches(&spec, &request));
+}
+
+#[test]
+fn longest_prefix_wins_and_prefix_is_normalised() {
+    let dep = |prefix: &str| -> vault_dsl::MockDep {
+        serde_json::from_value(json!({ "prefix": prefix, "stubs": [] })).unwrap()
+    };
+    let mut mocks = IndexMap::new();
+    mocks.insert("api".to_string(), dep("/api"));
+    mocks.insert("billing".to_string(), dep("/api/billing/"));
+    mocks.insert("payments".to_string(), dep("payments"));
+    let render: vault_mock::ResponseRenderer = std::sync::Arc::new(|r: &Value, _| Ok(r.clone()));
+    let session = vault_mock::Session::new("t", &mocks, UnmatchedPolicy::Allow, render);
+    let (dep, rest) = vault_mock::session::resolve_dep(&session, "/api/billing/v1/x").unwrap();
+    assert_eq!((dep.name.as_str(), rest.as_str()), ("billing", "/v1/x"));
+    let (dep, rest) = vault_mock::session::resolve_dep(&session, "/payments/v1/charges").unwrap();
+    assert_eq!(
+        (dep.name.as_str(), rest.as_str()),
+        ("payments", "/v1/charges")
+    );
+    assert!(vault_mock::session::resolve_dep(&session, "/apix/v1").is_none());
+}
+
+#[test]
+fn contradictory_count_bounds_fail_the_check_instead_of_overflowing() {
+    let r = report(
+        vec![
+            rec(0, "email", "POST", "/send", json!({})),
+            rec(1, "email", "POST", "/send", json!({})),
+        ],
+        &["email"],
+    );
+    let calls = vec![expect(
+        "impossible",
+        "email",
+        "POST",
+        "/send",
+        json!({"gte": 3, "lte": 1}),
+    )];
+    let out = verify_calls(
+        &r,
+        &calls,
+        &[],
+        &UnmatchedPolicy::Allow,
+        &MatchCtx::default(),
+    );
+    assert!(!out.passed());
+}
+
+#[test]
+fn repeated_query_keys_match_operators_on_any_element() {
+    let spec: MatchSpec =
+        serde_json::from_value(json!({"query": {"tag": {"regex": "^a$"}}})).unwrap();
+    let mut request = req("GET", "/x", json!({}));
+    request.query = json!({"tag": ["b", "a"]});
+    assert!(request_matches(&spec, &request));
+    request.query = json!({"tag": ["b", "c"]});
+    assert!(!request_matches(&spec, &request));
 }

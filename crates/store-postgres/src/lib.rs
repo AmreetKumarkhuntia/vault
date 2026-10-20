@@ -169,14 +169,49 @@ impl PostgresDriver {
                     let m = e
                         .as_object()
                         .ok_or_else(|| ValidationError::new(&path, "must be a mapping"))?;
-                    if !m.contains_key("table") {
-                        return Err(ValidationError::new(&path, "needs `table`"));
+                    non_empty_string(m.get("table"), &format!("{path}.table"))?;
+                    if let Some(eventually) = m.get("eventually") {
+                        vault_store::matchers::check_duration(eventually)
+                            .map_err(|e| ValidationError::new(format!("{path}.eventually"), e))?;
                     }
                     if !m.contains_key("expect") && !m.contains_key("expect_absent") {
                         return Err(ValidationError::new(
                             &path,
                             "needs `expect` or `expect_absent`",
                         ));
+                    }
+                    for key in ["expect", "expect_absent"] {
+                        match m.get(key) {
+                            None => {}
+                            Some(Value::String(s)) if s.contains("{{") => {}
+                            Some(Value::Array(rows)) => {
+                                for (ri, row) in rows.iter().enumerate() {
+                                    let at = format!("{path}.{key}[{ri}]");
+                                    if !row.is_object() {
+                                        return Err(ValidationError::new(at, "must be a mapping"));
+                                    }
+                                    vault_store::matchers::check_expected(row)
+                                        .map_err(|e| ValidationError::new(at, e))?;
+                                }
+                            }
+                            Some(_) => {
+                                return Err(ValidationError::new(
+                                    format!("{path}.{key}"),
+                                    "must be a list of mappings",
+                                ))
+                            }
+                        }
+                    }
+                    if let Some(count) = m.get("count") {
+                        let ok = count
+                            .as_str()
+                            .is_some_and(|c| matches!(c, "exact" | "at_least") || c.contains("{{"));
+                        if !ok {
+                            return Err(ValidationError::new(
+                                format!("{path}.count"),
+                                "must be `exact` or `at_least`",
+                            ));
+                        }
                     }
                 }
                 Ok(())
@@ -276,22 +311,59 @@ impl StateStore for PostgresStore {
     }
 
     async fn reset(&self, spec: &StoreDoc) -> Result<(), StoreError> {
+        // A misspelt or misplaced key would silently fall back to the destructive default.
+        if let Some(bad) = spec.as_object().and_then(|m| {
+            m.keys()
+                .find(|k| !["mode", "exclude"].contains(&k.as_str()))
+        }) {
+            return Err(StoreError::Harness(format!(
+                "postgres reset: unknown key `{bad}` (mode|exclude)"
+            )));
+        }
+        if spec.get("exclude").is_some_and(|e| !e.is_array()) {
+            return Err(StoreError::Harness(
+                "postgres reset: `exclude` must be a list".into(),
+            ));
+        }
         let mode = spec
             .get("mode")
             .and_then(Value::as_str)
             .unwrap_or("truncate");
-        if mode == "none" {
-            return Ok(());
+        match mode {
+            "none" => return Ok(()),
+            "truncate" => {}
+            other => {
+                return Err(StoreError::Harness(format!(
+                    "postgres reset: unknown mode `{other}` (truncate|none)"
+                )))
+            }
         }
-        let exclude: Vec<String> = spec
-            .get("exclude")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["schema_migrations".into(), "_sqlx_migrations".into()]);
+        // A user `exclude` extends this list rather than replacing it, so a customised
+        // reset can never wipe the application's own migration history.
+        const KEEP: &[&str] = &[
+            "schema_migrations",
+            "_sqlx_migrations",
+            "__diesel_schema_migrations",
+            "flyway_schema_history",
+            "alembic_version",
+            "_prisma_migrations",
+            "django_migrations",
+            "knex_migrations",
+            "knex_migrations_lock",
+            "goose_db_version",
+            "spatial_ref_sys",
+        ];
+        let mut exclude: Vec<String> = KEEP.iter().map(|s| s.to_string()).collect();
+        exclude.extend(
+            spec.get("exclude")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(|s| s.trim_start_matches("public.").to_string())
+                }),
+        );
 
         let rows = sqlx::query("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             .fetch_all(&self.pool)
@@ -518,16 +590,31 @@ impl StateStore for PostgresStore {
         let mut out = VerifyOutcome::default();
 
         for (ei, entry) in entries.iter().enumerate() {
-            let Some(table) = entry.get("table").and_then(Value::as_str) else {
-                continue;
-            };
-            let rows = self.fetch_rows(table).await?;
             let yaml_path = format!("verify.postgres[{ei}]");
+            let table = entry.get("table").and_then(Value::as_str).ok_or_else(|| {
+                StoreError::Harness(format!("{yaml_path}: `table` must be a string"))
+            })?;
+            if entry
+                .get("count")
+                .is_some_and(|c| !matches!(c.as_str(), Some("exact" | "at_least")))
+            {
+                return Err(StoreError::Harness(format!(
+                    "{yaml_path}.count: must be `exact` or `at_least`"
+                )));
+            }
+            let rows = self.fetch_rows(table).await?;
 
-            if let Some(expected) = entry.get("expect").and_then(Value::as_array) {
+            // Templates rendered since validation; a captured `a(b` is an invalid regex now.
+            for key in ["expect", "expect_absent"] {
+                for row in list_field(entry, key, &yaml_path)?.into_iter().flatten() {
+                    vault_store::matchers::check_expected(row)
+                        .map_err(|e| StoreError::Harness(format!("{yaml_path}.{key}: {e}")))?;
+                }
+            }
+            if let Some(expected) = list_field(entry, "expect", &yaml_path)? {
                 verify_expected_rows(table, &yaml_path, expected, entry, &rows, &ctx, &mut out);
             }
-            if let Some(absent) = entry.get("expect_absent").and_then(Value::as_array) {
+            if let Some(absent) = list_field(entry, "expect_absent", &yaml_path)? {
                 for (ai, exp) in absent.iter().enumerate() {
                     match rows.iter().find(|r| row_matches(exp, r, &ctx)) {
                         Some(found) => out.checks.push(CheckResult::Fail(CheckFailure::new(
@@ -603,8 +690,19 @@ fn reject_table_options(
     Ok(())
 }
 
-fn read_sql_file(path: &Path) -> std::io::Result<String> {
-    std::fs::read_to_string(path)
+/// A malformed `expect` (a mapping instead of a list) must fail, not silently check nothing.
+fn list_field<'a>(
+    entry: &'a Value,
+    key: &str,
+    yaml_path: &str,
+) -> Result<Option<&'a Vec<Value>>, StoreError> {
+    match entry.get(key) {
+        None => Ok(None),
+        Some(Value::Array(rows)) if rows.iter().all(Value::is_object) => Ok(Some(rows)),
+        Some(_) => Err(StoreError::Harness(format!(
+            "{yaml_path}.{key}: must be a list of mappings"
+        ))),
+    }
 }
 
 async fn set_standard_conforming_strings(
@@ -1250,7 +1348,7 @@ fn validate_resolved_sql_file(
             ),
         ));
     }
-    let sql = read_sql_file(resolved).map_err(|error| {
+    let sql = std::fs::read_to_string(resolved).map_err(|error| {
         ValidationError::new(
             yaml_path,
             format!(
@@ -1453,7 +1551,7 @@ fn runtime_sql_file(source: &ResolvedFileSource) -> Result<(PathBuf, String), St
             resolved.display()
         )));
     }
-    let sql = read_sql_file(&resolved).map_err(|error| {
+    let sql = std::fs::read_to_string(&resolved).map_err(|error| {
         StoreError::Harness(format!(
             "{} {} fixture `{}` selected by {} `{}` in `{}` resolved to `{}`: could not read UTF-8 SQL file: {error}",
             source.yaml_path,
@@ -1590,14 +1688,22 @@ fn path_sort_key(path: &Path) -> String {
 
 impl PostgresStore {
     async fn fetch_rows(&self, table: &str) -> Result<Vec<Value>, StoreError> {
+        // Verify and watch compare rows in memory; past the cap they would silently miss rows.
+        const ROW_CAP: usize = 1000;
         let sql = format!(
-            "SELECT to_jsonb(t) AS r FROM {} t LIMIT 1000",
-            quote_ident(table)
+            "SELECT to_jsonb(t) AS r FROM {} t LIMIT {}",
+            quote_table(table),
+            ROW_CAP + 1
         );
         let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
+        if rows.len() > ROW_CAP {
+            return Err(StoreError::Harness(format!(
+                "postgres: table `{table}` has more than {ROW_CAP} rows; verify and watch compare rows in memory and would silently miss some"
+            )));
+        }
         Ok(rows.iter().map(|r| r.get::<Value, _>("r")).collect())
     }
 }
@@ -1708,7 +1814,7 @@ fn identity_summary(expected: &Value) -> String {
     }
     id.iter()
         .take(3)
-        .map(|(k, v)| format!("{k}={}", compact(v)))
+        .map(|(k, v)| format!("{k}={}", matchers::compact(v)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1763,7 +1869,7 @@ async fn insert_row(
     // land in timestamptz/uuid/numeric/jsonb columns without client-side casts.
     let mut sql = format!(
         "INSERT INTO {t} ({col_list}) SELECT {col_list} FROM jsonb_populate_record(NULL::{t}, $1)",
-        t = quote_ident(table)
+        t = quote_table(table)
     );
     if conflict == "ignore" {
         sql.push_str(" ON CONFLICT DO NOTHING");
@@ -1780,11 +1886,13 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn compact(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
+/// `schema.table` quotes each segment on its own.
+// shortcut: a table whose own name contains '.' cannot be addressed; add escaping when someone needs it
+fn quote_table(name: &str) -> String {
+    name.split('.')
+        .map(quote_ident)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn db_err(e: sqlx::Error) -> StoreError {

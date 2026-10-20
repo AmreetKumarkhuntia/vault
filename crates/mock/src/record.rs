@@ -14,6 +14,9 @@ pub struct RecordedExchange {
     /// Name of the stub that served it; None = unmatched.
     pub matched_stub: Option<String>,
     pub responded_status: u16,
+    /// The stub matched but its response template failed to render.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
