@@ -1,3 +1,8 @@
+## v0.8.1 (2026-10-20)
+
+### Fixes
+- harden verification, mocks, reports and npm launcher (de0be35)
+
 ## v0.8.0 (2026-10-12)
 
 ### Features
