@@ -1,3 +1,8 @@
+## v0.9.0 (2026-10-27)
+
+### Features
+- route mock calls by prefix and shrink lane serialization (61fd75b)
+
 ## v0.8.1 (2026-10-20)
 
 ### Fixes
