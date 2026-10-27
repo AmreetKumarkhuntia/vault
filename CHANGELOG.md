@@ -1,3 +1,8 @@
+## v0.10.0 (2026-10-27)
+
+### Features
+- share forbidden mounts, log unattributed calls and declare serial items (44bc3b5)
+
 ## v0.9.0 (2026-10-27)
 
 ### Features
