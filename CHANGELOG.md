@@ -1,3 +1,8 @@
+## v0.10.1 (2026-10-27)
+
+### Fixes
+- arm the mock test before the stray call in the orphan fixtures (dbd776f)
+
 ## v0.10.0 (2026-10-27)
 
 ### Features
