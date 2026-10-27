@@ -49,6 +49,9 @@
   metadataRow('Selection',pageTitle || metadata.pattern || 'All tests');
   metadataRow('Tags',array(metadata.tags).join(', '));
   metadataRow('Shuffle seed',metadata.shuffle_seed);
+  const serialItems=array(metadata.items).filter(item=>item.serial);
+  if (serialItems.length) metadataRow('Serial tail',`${serialItems.length} item(s) ran one at a time after the lanes`);
+  if (array(run.orphans).length) metadataRow('Unattributed calls',`${run.orphans.length} during the parallel run · ${metadata.no_rerun?'candidates kept their parallel results (--no-rerun)':`${array(run.reruns).length} item(s) re-run one at a time`}`);
   for (const status of statuses) {
     if (status === 'NOT_RUN' && totals[status] === 0) continue;
     const stat = node('div','summary-stat'); stat.dataset.status=status;
@@ -198,10 +201,19 @@
     byId('filter-summary').textContent=`Showing ${visible.length} of ${descriptors.length} tests · ${statuses.filter(status=>visibleCounts[status]).map(status=>`${visibleCounts[status]} ${labels[status].toLowerCase()}`).join(', ') || 'No matches'}. Summary above shows whole-run totals.`;
     if (pageTitle) byId('filter-summary').textContent = byId('filter-summary').textContent.replace('whole-run totals', `${summaryLabel.toLowerCase()} totals`);
     const root=byId('results'); root.replaceChildren();
+    if (array(run.orphans).length) {
+      const section=node('section','result-group'); const heading=node('div','group-heading'); const title=node('div','group-title'); title.append(node('h2',null,'Unattributed outbound calls'),node('span','group-kind','Parallel run')); heading.append(title); section.append(heading);
+      section.append(node('p','notice',metadata.no_rerun?'These calls reached the mock listener while several tests were armed. No test was blamed (--no-rerun): each candidate carries a note and the run is marked failed.':'These calls reached the mock listener while several tests were armed. Every candidate item was re-run one at a time and its serial result replaced the parallel one.'));
+      const list=node('ul','orphan-list');
+      for (const orphan of run.orphans) list.append(node('li',null,`${orphan.method} ${orphan.path} · candidates: ${array(orphan.candidates).map(c=>c.flow?`${c.test} [${c.flow}]`:c.test).join(', ')}`));
+      section.append(list); root.append(section);
+    }
     for (const [key,tests] of groups) {
       const filtered=tests.filter(matches); if (!filtered.length) continue;
       const item=object(items.get(key)); const flow=item.kind==='flow' || tests.some(test=>test.flow); const group=node('section','result-group');
       const heading=node('div','group-heading'); const title=node('div','group-title'); title.append(node('h2',null,item.name || (flow?tests[0].flow:tests[0].name) || 'Tests'),node('span','group-kind',flow?'Flow':'Standalone test')); heading.append(title,badge(worst(tests))); group.append(heading);
+      if (item.serial) group.append(node('p','flow-policy',`Serial tail: ${item.serial.reason}${item.serial.stage?` (stage ${item.serial.stage})`:''}`));
+      const rerun=array(run.reruns).find(entry=>entry.item===item.id); if (rerun) { const first=array(rerun.first_attempt).map(result=>`${result.name}: ${labels[result.status]||result.status}`).join(', '); group.append(node('p','notice',`Re-run one at a time after the lanes: ${rerun.reason}. First attempt: ${first||'not finished'}.`)); }
       if (item.description) group.append(node('p','group-description',item.description));
       if (flow) {
         if (item.reset || item.on_failure) { const policy=node('p','flow-policy'); if (item.reset) policy.append(node('span',null,`Reset: ${item.reset}`)); if (item.on_failure) policy.append(node('span',null,`On failure: ${item.on_failure}`)); group.append(policy); }

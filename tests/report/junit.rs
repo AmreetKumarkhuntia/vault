@@ -38,6 +38,8 @@ fn control_characters_and_line_breaks_stay_well_formed_xml() {
         })],
     };
     let run = RunResult {
+        orphans: vec![],
+        reruns: vec![],
         schema_version: 1,
         environment: "local".into(),
         duration_ms: 2,

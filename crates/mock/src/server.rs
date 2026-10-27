@@ -6,19 +6,78 @@ use axum::extract::{Request, State};
 use axum::response::Response;
 use axum::Router;
 use parking_lot::Mutex;
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
+use vault_dsl::{MockDep, UnmatchedPolicy};
 
 use crate::record::{RecordedExchange, RecordedRequest};
 use crate::session::{resolve_dep, response_for, Session, SessionGuard};
 use crate::UNMATCHED_STATUS;
 
-/// Every armed session plus the mount prefixes currently claimed. Lanes share
-/// one listener, so a request is routed by the longest mount that covers it.
+/// How a test uses a mount. A stubbed (or `unmatched: allow`) mount answers
+/// calls, so it is exclusive; a forbidden mount only records violations, so
+/// any number of tests can forbid the same prefix at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimMode {
+    Provide,
+    Forbid,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Claim {
+    pub prefix: String,
+    pub mode: ClaimMode,
+}
+
+/// An empty mount whose resolved `unmatched` policy is `fail` is a Forbid;
+/// everything else answers calls and is a Provide.
+pub fn claim_mode(dep: &MockDep, default_unmatched: &UnmatchedPolicy) -> ClaimMode {
+    let policy = dep.unmatched.as_ref().unwrap_or(default_unmatched);
+    if dep.stubs.is_empty() && *policy == UnmatchedPolicy::Fail {
+        ClaimMode::Forbid
+    } else {
+        ClaimMode::Provide
+    }
+}
+
+/// An outbound call no armed session claimed during a parallel run. Nobody is
+/// blamed for it; the runner re-runs every candidate item serially instead.
+#[derive(Clone, Debug, Serialize)]
+pub struct Orphan {
+    pub method: String,
+    pub path: String,
+    pub query: Value,
+    pub at_unix_ms: i64,
+    /// Every test armed when the call arrived.
+    pub candidates: Vec<Candidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Candidate {
+    pub test: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
+}
+
+fn conflicts(a: &Claim, b: &Claim) -> bool {
+    mounts_overlap(&a.prefix, &b.prefix)
+        && (a.mode == ClaimMode::Provide || b.mode == ClaimMode::Provide)
+}
+
+/// Every armed session, the claims currently held, and the claims still
+/// queued in arrival order. Lanes share one listener, so a request is routed
+/// by the longest mount that covers it.
 #[derive(Default)]
 pub(crate) struct Armed {
     pub(crate) sessions: Vec<Arc<Session>>,
-    held: Vec<String>,
+    held: Vec<(u64, Claim)>,
+    waiting: Vec<(u64, Vec<Claim>)>,
+    next_ticket: u64,
+    /// Above one lane an unclaimed call cannot be attributed to a session.
+    parallel: bool,
+    orphans: Vec<Orphan>,
 }
 
 pub(crate) type Active = Arc<Mutex<Armed>>;
@@ -29,11 +88,18 @@ pub struct MockServer {
     addr: SocketAddr,
 }
 
-/// Exclusive hold on a set of mount prefixes, released on drop.
+/// A set of held claims, released on drop.
 pub struct PrefixClaim {
     active: Active,
     released: Arc<Notify>,
-    prefixes: Vec<String>,
+    ticket: u64,
+    claims: Vec<Claim>,
+}
+
+impl PrefixClaim {
+    pub fn claims(&self) -> &[Claim] {
+        &self.claims
+    }
 }
 
 impl Drop for PrefixClaim {
@@ -41,7 +107,25 @@ impl Drop for PrefixClaim {
         self.active
             .lock()
             .held
-            .retain(|held| !self.prefixes.contains(held));
+            .retain(|(ticket, _)| *ticket != self.ticket);
+        self.released.notify_waiters();
+    }
+}
+
+/// Removes a queued claim when its `claim()` future is dropped before being
+/// granted, so a cancelled lane never blocks the claims behind it.
+struct Queued {
+    active: Active,
+    released: Arc<Notify>,
+    ticket: u64,
+}
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .waiting
+            .retain(|(ticket, _)| *ticket != self.ticket);
         self.released.notify_waiters();
     }
 }
@@ -89,29 +173,60 @@ impl MockServer {
         format!("http://{}", self.addr)
     }
 
-    /// Waits until none of `prefixes` overlaps a claimed mount, then holds
-    /// them all. Callers take the claim before their clocks start so queueing
-    /// never counts as test time.
-    pub async fn claim(&self, prefixes: Vec<String>) -> PrefixClaim {
+    /// Holds `claims` once none of them conflicts with a held claim or with a
+    /// claim queued earlier: arrival order, so a stream of shared forbids can
+    /// never starve a waiting stub owner. Callers claim before their clocks
+    /// start so queueing never counts as test time.
+    pub async fn claim(&self, claims: Vec<Claim>) -> PrefixClaim {
+        let ticket = {
+            let mut armed = self.active.lock();
+            armed.next_ticket += 1;
+            let ticket = armed.next_ticket;
+            armed.waiting.push((ticket, claims.clone()));
+            ticket
+        };
+        let _queued = Queued {
+            active: self.active.clone(),
+            released: self.released.clone(),
+            ticket,
+        };
         loop {
             // Registered before the check so a release in between is not missed.
             let released = self.released.notified();
             {
                 let mut armed = self.active.lock();
-                let conflict = prefixes
-                    .iter()
-                    .any(|p| armed.held.iter().any(|h| mounts_overlap(p, h)));
-                if !conflict {
-                    armed.held.extend(prefixes.iter().cloned());
+                let blocked = claims.iter().any(|c| {
+                    armed.held.iter().any(|(_, h)| conflicts(c, h))
+                        || armed.waiting.iter().any(|(t, queued)| {
+                            *t < ticket && queued.iter().any(|h| conflicts(c, h))
+                        })
+                });
+                if !blocked {
+                    armed.waiting.retain(|(t, _)| *t != ticket);
+                    armed
+                        .held
+                        .extend(claims.iter().cloned().map(|c| (ticket, c)));
                     return PrefixClaim {
                         active: self.active.clone(),
                         released: self.released.clone(),
-                        prefixes,
+                        ticket,
+                        claims,
                     };
                 }
             }
             released.await;
         }
+    }
+
+    /// With several lanes an unclaimed call goes to the orphan log instead of a
+    /// session; with one lane it lands in the only armed session, as a serial
+    /// run always did.
+    pub fn set_parallel(&self, parallel: bool) {
+        self.active.lock().parallel = parallel;
+    }
+
+    pub fn drain_orphans(&self) -> Vec<Orphan> {
+        std::mem::take(&mut self.active.lock().orphans)
     }
 
     pub fn arm(&self, session: Session, claim: PrefixClaim) -> SessionGuard {
@@ -154,13 +269,64 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
         );
     }
 
-    // Claims are exclusive, so at most one armed session mounts any prefix.
-    let owner = sessions
+    // A stubbed mount is exclusive, so at most one armed session can answer; any
+    // number may forbid the path, and each of them records the violation.
+    let covering: Vec<_> = sessions
         .iter()
         .filter_map(|s| resolve_dep(s, &path).map(|(dep, rel)| (s, dep, rel)))
-        .max_by_key(|(_, dep, _)| dep.prefix.len());
-    let Some((session, dep, rel_path)) = owner else {
-        // No lane owns this path: every armed session sees it, so no lane passes by accident.
+        .collect();
+    let provider = covering
+        .iter()
+        .find(|(_, dep, _)| dep.mode == ClaimMode::Provide);
+    let Some((session, dep, rel_path)) = provider else {
+        if !covering.is_empty() {
+            for (session, dep, rel_path) in &covering {
+                session.record(RecordedExchange {
+                    seq: 0,
+                    at_unix_ms: now_ms(),
+                    dependency: dep.name.clone(),
+                    request: RecordedRequest {
+                        method: method.clone(),
+                        path: rel_path.clone(),
+                        query: query.clone(),
+                        headers: headers.clone(),
+                        body: body.clone(),
+                        body_json: body_json.clone(),
+                    },
+                    matched_stub: None,
+                    responded_status: UNMATCHED_STATUS,
+                    render_error: None,
+                });
+            }
+            return plain(
+                UNMATCHED_STATUS,
+                json!({"error": "vault-mock: dependency must not be called", "path": uri.path()}),
+            );
+        }
+        {
+            let mut armed = active.lock();
+            if armed.parallel {
+                // Any armed lane could have made this call; log it instead of blaming all of them.
+                armed.orphans.push(Orphan {
+                    method,
+                    path,
+                    query,
+                    at_unix_ms: now_ms(),
+                    candidates: sessions
+                        .iter()
+                        .map(|s| Candidate {
+                            test: s.key.clone(),
+                            flow: s.flow.clone(),
+                        })
+                        .collect(),
+                });
+                return plain(
+                    UNMATCHED_STATUS,
+                    json!({"error": "vault-mock: no dependency prefix matched", "path": uri.path()}),
+                );
+            }
+        }
+        // One lane: the only armed session made the call, so it is recorded there.
         let unknown = RecordedExchange {
             seq: 0,
             at_unix_ms: now_ms(),
@@ -189,7 +355,7 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
 
     let recorded = RecordedRequest {
         method,
-        path: rel_path,
+        path: rel_path.clone(),
         query,
         headers,
         body,

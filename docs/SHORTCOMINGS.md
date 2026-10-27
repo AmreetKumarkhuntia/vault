@@ -39,6 +39,8 @@ reason, fix, pull request, and first fixed release remain traceable.
 | 17 | VLT-017 | Done | M | `watch` diffs whole tables, so every watch test locks the run |
 | 18 | VLT-018 | Done | S | Tests have no per-flow identity, and default headers are not templated |
 | 19 | VLT-019 | Done | M | `--parallel` has no serial tail and no isolated rerun |
+| 20 | VLT-020 | Done | M | Forbidden dependencies serialize like stubbed ones |
+| 21 | VLT-021 | Done | M | Unclaimed calls blame every armed test, and only a tag keeps an item out of the lanes |
 
 ## VLT-001: Empty test selections exit successfully
 
@@ -460,10 +462,8 @@ static in practice and a test can claim them before its clock starts.
 
 A and B wait for each other. C and D run alongside either of them.
 
-**Later relaxation (not in the first cut).** Stub-less mounts with `unmatched: fail` and only
-`count: 0` expectations (B above) could share a prefix as Guards, with orphan calls broadcast to
-every Guard; the simulation puts that at about 92 s against 124 s at 8 lanes. Also deferred:
-fairness for waiting claims, a run-level orphan log, and a per-call route column in the report.
+**Relaxed by VLT-020.** Forbidden mounts (B above) are shared claims, granted in arrival order.
+Still deferred: a run-level orphan log and a per-call route column in the report.
 
 **Known limitation.** Suppose a test starts calling a prefix it did not declare, while another
 test owns that prefix with an absorbing expectation (unbounded count or `unexpected: allow`). That
@@ -503,20 +503,17 @@ answered 599 and never reported. They went to `/euler` and `/platform/arch-store
 **Example.** A login case declares no `mocks:`. Its request makes the target call `/euler/...`,
 which gets a 599, and the case still passes because none of its assertions depends on that call.
 
-**Proposed resolution.** Always drain the session. A test with no mocks that recorded any call
-fails with "undeclared outbound call", listing each call's method, path and dependency. These tests
-get no quiet-wait, so they stay as fast as today. `defaults.mock.unmatched: allow` keeps today's
-behaviour for suites that want it.
-
-**Ordering.** Before VLT-014, tests without mocks overlap under the read lock and `arm()` replaces
-the single active slot, so a stray call lands in whichever lane armed last. This check is only
-reliable in parallel runs once prefix routing exists.
+**Resolution.** Always drain the session. A test with no mocks keeps every recorded call in its
+report entry (`recorded_calls`), so a stray or newly added outbound call is visible, but the test
+does not fail and gets no quiet-wait. Failing by default was tried first and reverted: a real
+suite had passing tests whose target calls dependencies it does not need, and whether that is
+acceptable is the suite's policy, not a harness defect.
 
 **Acceptance criteria.**
 
-- The failure lists every recorded call.
+- Every call recorded during a test without mocks appears in that test's report entry.
 - Tests that record nothing are unaffected and take no extra time.
-- With VLT-014 in place the check behaves the same in serial and parallel runs.
+- The verdict of a test without mocks never depends on those calls.
 
 ## VLT-017: `watch` diffs whole tables, so every watch test locks the run
 
@@ -637,6 +634,85 @@ at a time with reset.
 - Tagged items always get their reset and start only after every lane has finished.
 - Results stay in plan order in every report.
 - `--parallel 1` is unchanged.
+
+## VLT-020: Forbidden dependencies serialize like stubbed ones
+
+**Completed.** Implemented on branch `feat/forbid-claims` as one commit on top of v0.9.0; record the
+pull request and first released version on merge.
+
+**Problem.** `mocks` serves two intents: provide (answer this dependency with stubs) and forbid
+(this dependency must not be called, written as an empty mount such as `euler: {}` that works only
+because an unmatched call fails). VLT-014 claims every mount exclusively, so forbids queue behind
+each other for no reason.
+
+**Risk.** In the Vayu suite 191 Euler "must not call" tests serialize, a floor of roughly 230 s per
+parallel run that no lane count removes.
+
+**Evidence.** `MockServer::claim` in v0.9.0 treats every mount the same and wakes every waiter on
+release, so there is no fairness either.
+
+**Resolution.** Each claim carries a mode. A stubbed mount, or one whose resolved `unmatched`
+policy is `allow`, is a Provide and stays exclusive. An empty mount with `unmatched: fail`, or an
+entry in the new `verify.no_calls`, is a Forbid: Forbids share a prefix and conflict only with an
+overlapping Provide. Claims are granted in arrival order, so a stream of Forbids cannot starve a
+waiting Provide. A call under forbidden prefixes only is recorded in every test forbidding it and
+answered 599; a call under no claim stays `<unknown>` in every running test. Validation rejects a
+dependency that is both mocked and forbidden in one test, and a Forbid nested inside the test's
+own stubbed mount (use `verify.calls` with `count: 0`). Serial runs are unchanged: one lane means
+one armed session.
+
+**Known limitation.** A call from one test into a prefix another lane stubs is attributed to that
+lane and may be absorbed by its stub. Keep a serial run as the backstop. One real forbidden call
+fails every test forbidding that prefix at the time; blame needs a serial re-run.
+
+**Non-goals.** A run-level orphan log and a per-call route column in the report; routing by request
+content; per-lane stores.
+
+**Acceptance criteria.**
+
+- Two tests forbidding the same prefix overlap; a Provide on an overlapping prefix waits for them
+  and is granted before any Forbid that arrived after it.
+- A forbidden call fails each test forbidding it with a message that names the dependency.
+- Existing empty mounts get the sharing without a rewrite.
+- `vault validate` rejects the two conflicting declarations above.
+
+## VLT-021: Unclaimed calls blame every armed test, and only a tag keeps an item out of the lanes
+
+**Completed.** Implemented on branch `feat/forbid-claims` as one commit on top of v0.9.0; record the
+pull request and first released version on merge.
+
+**Problem.** Above one lane, a call whose path no armed session claims was recorded as `<unknown>`
+in every armed session. A test without mocks that calls an undeclared dependency therefore passed
+while every mock test running at that moment failed for a call it never made. Separately, the only
+way to keep an item out of the lanes was `--serial-tag` on the command line, so a suite could not
+record which of its tests are not parallel-safe.
+
+**Risk.** False failures that depend on timing, and an invisible split between lane-safe and
+single-lane items.
+
+**Evidence.** `crates/mock/src/server.rs` broadcast unknown calls; `crates/cli/src/runcmd.rs` built
+the serial tail from tags alone.
+
+**Resolution.** Under `--parallel`, every test must end with the result a serial run would give it.
+Items known not to be parallel-safe declare `serial: <reason>` (on a test, or on a flow; a serial
+stage makes its flow serial) and run in the serial tail from the start; `--serial-tag` still adds
+items. Items that turn out ambiguous during the run are re-run one at a time afterwards: above one
+lane an unclaimed call is answered 599 and appended to a run-level orphan log with every test armed
+at the time as a candidate, recorded against nobody. After the lanes and the tail, each candidate
+item (the whole flow for a stage, de-duplicated, skipping items the tail already ran) is re-run
+with serial semantics, and its re-run result is final; the report keeps the first attempt, the
+reason and the orphan entries. `--no-rerun` keeps the parallel results, notes the calls on each
+candidate, prints the orphan log and exits non-zero. One lane is unchanged: the call lands in the
+only armed session. Order: lanes, serial tail, re-runs.
+
+**Acceptance criteria.**
+
+- A no-mock test calling an undeclared dependency beside a mock test leaves both passing after the
+  re-run, and the orphan log names both as candidates.
+- A mock test calling an undeclared dependency fails with `<unknown>` after its serial re-run.
+- `--no-rerun` exits non-zero, prints the orphan log, and blames no test.
+- A serial stage sends its whole flow to the tail with a reset; `vault list` shows the reason; an
+  empty reason is a validation error; `--parallel 1` ignores the field.
 
 ## Explicitly out of scope
 

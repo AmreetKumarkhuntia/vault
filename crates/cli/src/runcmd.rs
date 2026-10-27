@@ -27,6 +27,7 @@ pub struct RunArgs {
     pub seed: Option<u64>,
     pub parallel: usize,
     pub serial_tags: Vec<String>,
+    pub no_rerun: bool,
     pub report: Option<String>,
     pub junit: Option<String>,
     pub html: Option<String>,
@@ -454,10 +455,30 @@ pub fn list(pattern: Option<String>, tags: Vec<String>, suite_dir: String, fixtu
             Err(code) => return code,
         };
     }
+    let serial_note = |reason: Option<&String>| {
+        reason
+            .map(|reason| format!("  (serial: {reason})"))
+            .unwrap_or_default()
+    };
     for f in &selected_plan.flows {
-        println!("{} {}", "flow".cyan().bold(), f.def.flow);
+        println!(
+            "{} {}{}",
+            "flow".cyan().bold(),
+            f.def.flow,
+            serial_note(f.def.serial.as_ref()).dimmed()
+        );
         for (i, stage) in f.def.stages.iter().enumerate() {
-            println!("    {}. {}", i + 1, stage.test);
+            let serial = suite
+                .tests
+                .iter()
+                .find(|t| t.def.test == stage.test)
+                .and_then(|t| t.def.serial.as_ref());
+            println!(
+                "    {}. {}{}",
+                i + 1,
+                stage.test,
+                serial_note(serial).dimmed()
+            );
         }
     }
     for t in &selected_plan.standalone {
@@ -466,7 +487,13 @@ pub fn list(pattern: Option<String>, tags: Vec<String>, suite_dir: String, fixtu
         } else {
             format!("  [{}]", t.def.tags.join(", "))
         };
-        println!("{} {}{}", "test".green().bold(), t.def.test, tags.dimmed());
+        println!(
+            "{} {}{}{}",
+            "test".green().bold(),
+            t.def.test,
+            tags.dimmed(),
+            serial_note(t.def.serial.as_ref()).dimmed()
+        );
     }
     println!(
         "\n{} flows, {} standalone tests",
@@ -664,6 +691,9 @@ pub fn print_env(env: String, suite_dir: String) -> i32 {
     for t in &suite.tests {
         for (name, dep) in &t.def.mocks {
             deps.insert(name.clone(), dep.mount(name));
+        }
+        for forbid in &t.def.verify.no_calls {
+            deps.insert(forbid.dependency().to_string(), forbid.mount());
         }
     }
     for (dep, mount) in deps {
@@ -926,6 +956,40 @@ async fn run_async<'s>(
         None
     };
 
+    // Items that must not share the baseline: declared in YAML (a serial stage makes its
+    // whole flow serial) or selected by --serial-tag. One lane ignores both.
+    let serial_reason = |item: &Item| -> Option<Value> {
+        if args.parallel <= 1 {
+            return None;
+        }
+        let declared = match item {
+            Item::Test(t) => t
+                .def
+                .serial
+                .as_ref()
+                .map(|reason| json!({"reason": reason})),
+            Item::Flow(f) => f
+                .def
+                .serial
+                .as_ref()
+                .map(|reason| json!({"reason": reason}))
+                .or_else(|| {
+                    f.def.stages.iter().find_map(|stage| {
+                        tests_by_name
+                            .get(&stage.test)
+                            .and_then(|t| t.serial.as_ref())
+                            .map(|reason| json!({"reason": reason, "stage": stage.test}))
+                    })
+                }),
+        };
+        declared.or_else(|| {
+            item.tags()
+                .iter()
+                .find(|tag| args.serial_tags.contains(tag))
+                .map(|tag| json!({"reason": format!("tag `{tag}`")}))
+        })
+    };
+
     let html_path = args.html.clone().or(suite.config.report.html.clone());
     let collect_evidence = html_path.is_some();
     let mut report_items = Vec::new();
@@ -940,6 +1004,7 @@ async fn run_async<'s>(
                     "id": item_id, "name": test.def.test, "kind": "test",
                     "description": test.def.description, "tags": test.def.tags,
                     "source": report_source_path(suite, &test.path),
+                    "serial": serial_reason(item),
                 }));
                 let mut descriptor = report_test_descriptor(suite, test);
                 descriptor["id"] = json!(format!("{item_id}-test"));
@@ -952,6 +1017,7 @@ async fn run_async<'s>(
                     "description": flow.def.description, "tags": flow.def.tags,
                     "source": report_source_path(suite, &flow.path),
                     "reset": flow.def.reset, "on_failure": flow.def.on_failure,
+                    "serial": serial_reason(item),
                 }));
                 for (stage_index, stage) in flow.def.stages.iter().enumerate() {
                     let test = suite
@@ -976,15 +1042,17 @@ async fn run_async<'s>(
     let started_at = chrono::Utc::now().to_rfc3339();
     let mut run = RunResult {
         schema_version: 1,
+        orphans: vec![],
+        reruns: vec![],
         environment: args.env.clone(),
         tests: vec![],
         duration_ms: 0,
     };
 
     let (runner, tests_by_name) = (&runner, &tests_by_name);
-    // Items with a serial tag stay out of the lanes and run afterwards, one at a time.
-    let is_serial =
-        |item: &Item| args.parallel > 1 && item.tags().iter().any(|t| args.serial_tags.contains(t));
+    // Serial items stay out of the lanes and run afterwards, one at a time.
+    let is_serial = |item: &Item| serial_reason(item).is_some();
+    runner.mock.set_parallel(args.parallel > 1);
     // Items start in plan order with at most `parallel` in flight; each result lands in
     // its plan slot whatever finishes first, so reports stay deterministic.
     let mut lanes = futures_util::stream::iter(
@@ -1029,10 +1097,13 @@ async fn run_async<'s>(
         }
     }
     drop(lanes);
-    // The shared baseline is over, so tail items reset like a serial run.
+    // The shared baseline is over: from here on one item runs at a time with its own
+    // reset, and an unclaimed call lands in the only armed session, as in a serial run.
     runner
         .shared_baseline
         .store(false, std::sync::atomic::Ordering::SeqCst);
+    runner.mock.set_parallel(false);
+    let mut tail_ran = HashSet::new();
     for (index, item) in items.iter().enumerate().filter(|(_, item)| is_serial(item)) {
         if interrupted || runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
             break;
@@ -1040,8 +1111,73 @@ async fn run_async<'s>(
         tokio::select! {
             output = run_item(runner, item, tests_by_name, collect_evidence) => {
                 outputs[index] = Some(output);
+                tail_ran.insert(index);
             }
             _ = &mut interrupt => interrupted = true,
+        }
+    }
+
+    // Calls nobody claimed during the lanes: every item armed at the time is a candidate,
+    // and only a serial run of it can say whether the call was its own.
+    const RERUN_REASON: &str = "unattributed outbound call during the parallel run";
+    let orphans = runner.mock.drain_orphans();
+    let item_of = |candidate: &vault_mock::Candidate| {
+        items.iter().position(|item| match (item, &candidate.flow) {
+            (Item::Flow(f), Some(flow)) => f.def.flow == *flow,
+            (Item::Test(t), None) => t.def.test == candidate.test,
+            _ => false,
+        })
+    };
+    let mut candidates: Vec<usize> = orphans
+        .iter()
+        .flat_map(|orphan| orphan.candidates.iter().filter_map(&item_of))
+        .filter(|index| !tail_ran.contains(index))
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut reruns = Vec::new();
+    let mut rerun_items = HashSet::new();
+    if args.no_rerun {
+        // Nobody is blamed: each candidate keeps its parallel result and a note.
+        for orphan in &orphans {
+            for candidate in &orphan.candidates {
+                let Some(index) = item_of(candidate) else {
+                    continue;
+                };
+                let Some((results, _)) = outputs[index].as_mut() else {
+                    continue;
+                };
+                for result in results.iter_mut().filter(|r| r.name == candidate.test) {
+                    result.verify.push_pass(format!(
+                        "{RERUN_REASON} (not blamed, --no-rerun): {} {}",
+                        orphan.method, orphan.path
+                    ));
+                }
+            }
+        }
+    } else {
+        for index in candidates {
+            if interrupted || runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::select! {
+                output = run_item(runner, &items[index], tests_by_name, collect_evidence) => {
+                    let first = outputs[index].replace(output);
+                    rerun_items.insert(index);
+                    reruns.push(json!({
+                        "item": format!("item-{}", index + 1),
+                        "reason": RERUN_REASON,
+                        "orphans": orphans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, orphan)| orphan.candidates.iter().any(|c| item_of(c) == Some(index)))
+                            .map(|(i, _)| i)
+                            .collect::<Vec<_>>(),
+                        "first_attempt": first.map(|(results, _)| results).unwrap_or_default(),
+                    }));
+                }
+                _ = &mut interrupt => interrupted = true,
+            }
         }
     }
     let unfinished = outputs.iter().filter(|output| output.is_none()).count();
@@ -1084,16 +1220,27 @@ async fn run_async<'s>(
         }
         for index in 0..results.len() {
             report_tests[offset + index]["result_index"] = json!(run.tests.len() + index);
+            if rerun_items.contains(&item_index) {
+                report_tests[offset + index]["rerun"] = json!(RERUN_REASON);
+            }
         }
         run.tests.extend(results);
     }
     run.duration_ms = started.elapsed().as_millis() as u64;
+    run.orphans = orphans;
+    run.reruns = reruns;
 
-    let run_exit_code = run.exit_code();
+    // With --no-rerun an unattributed call is never lost: the run goes red even though no
+    // test was blamed for it.
+    let run_exit_code = if args.no_rerun && !run.orphans.is_empty() {
+        run.exit_code().max(1)
+    } else {
+        run.exit_code()
+    };
     let mut metadata = json!({
         "started_at": started_at, "suite": suite.root.display().to_string(),
         "pattern": args.pattern, "tags": args.tags, "shuffle_seed": shuffle_seed,
-        "parallel": args.parallel, "serial_tags": args.serial_tags,
+        "parallel": args.parallel, "serial_tags": args.serial_tags, "no_rerun": args.no_rerun,
         "items": report_items, "tests": report_tests,
     });
     // Discover across all surfaces before masking: a captured credential may
@@ -1110,6 +1257,33 @@ async fn run_async<'s>(
     }
 
     vault_report::print_run(&run, args.verbose);
+    if !run.orphans.is_empty() {
+        println!(
+            "{} {} unattributed outbound call(s) during the parallel run{}",
+            "!".yellow().bold(),
+            run.orphans.len(),
+            if args.no_rerun {
+                "; candidates keep their parallel results (--no-rerun)"
+            } else {
+                "; every candidate item was re-run one at a time"
+            }
+        );
+        for orphan in &run.orphans {
+            let candidates = orphan
+                .candidates
+                .iter()
+                .map(|c| match &c.flow {
+                    Some(flow) => format!("{} [{flow}]", c.test),
+                    None => c.test.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {} {}  candidates: {candidates}",
+                orphan.method, orphan.path
+            );
+        }
+    }
 
     let html_report = html_path.as_ref().map(|_| vault_report::HtmlReport {
         schema_version: 1,

@@ -91,6 +91,8 @@ fn masks_sensitive_diff_paths_and_raw_payloads_without_changing_inputs() {
 #[test]
 fn masks_existing_run_shapes_and_junit_diagnostics() {
     let mut run = RunResult {
+        orphans: vec![],
+        reruns: vec![],
         schema_version: 1,
         environment: "local".into(),
         duration_ms: 15,
@@ -476,6 +478,8 @@ fn long_credential_preview_masking_reaches_json_and_junit_without_changing_match
         attempts: 1,
     });
     let mut run = RunResult {
+        orphans: vec![],
+        reruns: vec![],
         schema_version: 1,
         environment: "local".into(),
         tests: vec![test],
@@ -564,6 +568,8 @@ fn userinfo_in_unparseable_urls_is_masked() {
 #[test]
 fn step_names_that_end_in_a_secret_word_do_not_hide_report_text() {
     let mut run = RunResult {
+        orphans: vec![],
+        reruns: vec![],
         schema_version: 1,
         environment: "local".into(),
         duration_ms: 1,

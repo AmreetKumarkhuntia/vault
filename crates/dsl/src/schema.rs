@@ -206,6 +206,10 @@ pub struct TestDef {
     pub tags: Vec<String>,
     #[serde(default)]
     pub skip: Skip,
+    /// Why this test must not share the baseline: under `--parallel` it runs in
+    /// the serial tail, and so does every flow it is a stage of.
+    #[serde(default)]
+    pub serial: Option<String>,
     #[serde(default = "default_test_timeout", with = "humantime_serde")]
     pub timeout: Duration,
     #[serde(default)]
@@ -286,14 +290,18 @@ pub struct MockDep {
 
 impl MockDep {
     /// Mount path on the shared listener: `/<name>` unless `prefix` overrides it.
-    /// Normalised to a leading `/` and no trailing one; the root mount is "".
     pub fn mount(&self, name: &str) -> String {
-        let raw = self.prefix.as_deref().unwrap_or(name).trim_matches('/');
-        if raw.is_empty() {
-            String::new()
-        } else {
-            format!("/{raw}")
-        }
+        mount_path(self.prefix.as_deref(), name)
+    }
+}
+
+/// Normalised to a leading `/` and no trailing one; the root mount is "".
+pub fn mount_path(prefix: Option<&str>, name: &str) -> String {
+    let raw = prefix.unwrap_or(name).trim_matches('/');
+    if raw.is_empty() {
+        String::new()
+    } else {
+        format!("/{raw}")
     }
 }
 
@@ -487,9 +495,41 @@ pub struct VerifyBlock {
     /// Overrides `defaults.verify.settle` for this test's quiet-wait and re-checks.
     #[serde(default, with = "humantime_serde::option")]
     pub settle: Option<Duration>,
+    /// Dependencies the target must not call during this test. A forbidden
+    /// mount is shared between lanes; only a stubbed mount is exclusive.
+    #[serde(default)]
+    pub no_calls: Vec<NoCall>,
     /// Store verify docs keyed by kind (postgres, redis, …). Driver-owned.
     #[serde(flatten)]
     pub stores: IndexMap<String, Json>,
+}
+
+/// `euler` forbids the default mount `/euler`; `{dependency, prefix}` forbids
+/// another path under that name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NoCall {
+    Dependency(String),
+    Mount {
+        dependency: String,
+        #[serde(default)]
+        prefix: Option<String>,
+    },
+}
+
+impl NoCall {
+    pub fn dependency(&self) -> &str {
+        match self {
+            NoCall::Dependency(d) | NoCall::Mount { dependency: d, .. } => d,
+        }
+    }
+
+    pub fn mount(&self) -> String {
+        match self {
+            NoCall::Dependency(d) => mount_path(None, d),
+            NoCall::Mount { dependency, prefix } => mount_path(prefix.as_deref(), dependency),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +575,9 @@ pub struct FlowDef {
     pub description: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Why this flow must not share the baseline under `--parallel`.
+    #[serde(default)]
+    pub serial: Option<String>,
     #[serde(default)]
     pub reset: FlowReset,
     pub stages: Vec<FlowStage>,
