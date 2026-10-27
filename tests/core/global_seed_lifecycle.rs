@@ -106,7 +106,7 @@ async fn runner(global_seed: Value, fail_seed_at: Option<usize>) -> (TestRunner,
             mock: Arc::new(MockServer::start("127.0.0.1:0").await.unwrap()),
             gate: Arc::new(NoopGate),
             abort_run: std::sync::atomic::AtomicBool::new(false),
-            shared_baseline: false,
+            shared_baseline: std::sync::atomic::AtomicBool::new(false),
             exclusive: tokio::sync::RwLock::new(()),
         },
         state,
@@ -377,7 +377,7 @@ async fn apply_baseline_resets_then_seeds_global_once() {
 #[tokio::test]
 async fn shared_baseline_never_resets_or_reapplies_global_seed() {
     let (mut runner, state) = runner(json!([{"sql": "global"}]), None).await;
-    runner.shared_baseline = true;
+    runner.shared_baseline = std::sync::atomic::AtomicBool::new(true);
     let standalone = test_def(
         r#"
 test: standalone

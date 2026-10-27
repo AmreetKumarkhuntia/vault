@@ -19,7 +19,7 @@ minijinja = "2.24.0"
 serde_json_path = "0.7.2"
 regex = "1.13.1"
 thiserror = "2.0.20"
-uuid = { version = "1.26.1", features = ["v4"] }
+uuid = { version = "1.26.1", features = ["v4", "v5"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 rand = "0.10.3"
 
@@ -37,3 +37,19 @@ path = "../../tests/core/execution_evidence.rs"
 [[test]]
 name = "global_seed_lifecycle"
 path = "../../tests/core/global_seed_lifecycle.rs"
+
+[[test]]
+name = "settle"
+path = "../../tests/core/settle.rs"
+
+[[test]]
+name = "parallel_mocks"
+path = "../../tests/core/parallel_mocks.rs"
+
+[[test]]
+name = "undeclared_calls"
+path = "../../tests/core/undeclared_calls.rs"
+
+[[test]]
+name = "identity"
+path = "../../tests/core/identity.rs"

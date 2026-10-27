@@ -7,6 +7,7 @@ use serde_json::Value;
 use vault_dsl::{MockDep, UnmatchedPolicy};
 
 use crate::record::RecordedExchange;
+use crate::server::{Active, PrefixClaim};
 
 /// Renders one stub response for one request. The engine supplies it so stub
 /// templates follow the same rules as every other template in the test.
@@ -120,9 +121,11 @@ pub struct SessionReport {
 /// Disarms the session on Drop — survives panics and Ctrl-C paths where the
 /// engine unwinds.
 pub struct SessionGuard {
-    pub(crate) active: Arc<Mutex<Option<Arc<Session>>>>,
+    pub(crate) active: Active,
     pub(crate) session: Arc<Session>,
     pub(crate) base_url: String,
+    /// Dropped after the session is removed, so the next claimant never routes to it.
+    pub(crate) _claim: PrefixClaim,
 }
 
 impl SessionGuard {
@@ -165,12 +168,10 @@ impl SessionGuard {
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        let mut active = self.active.lock();
-        if let Some(current) = active.as_ref() {
-            if Arc::ptr_eq(current, &self.session) {
-                *active = None;
-            }
-        }
+        self.active
+            .lock()
+            .sessions
+            .retain(|armed| !Arc::ptr_eq(armed, &self.session));
     }
 }
 

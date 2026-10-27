@@ -520,8 +520,8 @@ impl StateStore for PostgresStore {
             .ok_or_else(|| StoreError::Harness("watch doc must be a table list".into()))?;
         let mut snap = Map::new();
         for t in tables {
-            let Some(table) = t.as_str() else { continue };
-            snap.insert(table.to_string(), json!(self.fetch_rows(table).await?));
+            let (table, filter) = watch_entry(t)?;
+            snap.insert(t.to_string(), json!(self.fetch_rows(table, filter).await?));
         }
         Ok(Value::Object(snap))
     }
@@ -534,10 +534,10 @@ impl StateStore for PostgresStore {
         let mut out = VerifyOutcome::default();
         let tables = doc.as_array().cloned().unwrap_or_default();
         for t in &tables {
-            let Some(table) = t.as_str() else { continue };
-            let after = self.fetch_rows(table).await?;
+            let (table, filter) = watch_entry(t)?;
+            let after = self.fetch_rows(table, filter).await?;
             let before_rows: Vec<Value> = before
-                .get(table)
+                .get(t.to_string())
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
@@ -602,7 +602,7 @@ impl StateStore for PostgresStore {
                     "{yaml_path}.count: must be `exact` or `at_least`"
                 )));
             }
-            let rows = self.fetch_rows(table).await?;
+            let rows = self.fetch_rows(table, None).await?;
 
             // Templates rendered since validation; a captured `a(b` is an invalid regex now.
             for key in ["expect", "expect_absent"] {
@@ -1687,18 +1687,29 @@ fn path_sort_key(path: &Path) -> String {
 }
 
 impl PostgresStore {
-    async fn fetch_rows(&self, table: &str) -> Result<Vec<Value>, StoreError> {
+    /// `filter` is a jsonb document every returned row must contain (`@>`).
+    async fn fetch_rows(
+        &self,
+        table: &str,
+        filter: Option<&Value>,
+    ) -> Result<Vec<Value>, StoreError> {
         // Verify and watch compare rows in memory; past the cap they would silently miss rows.
         const ROW_CAP: usize = 1000;
         let sql = format!(
-            "SELECT to_jsonb(t) AS r FROM {} t LIMIT {}",
+            "SELECT to_jsonb(t) AS r FROM {} t{} LIMIT {}",
             quote_table(table),
+            if filter.is_some() {
+                " WHERE to_jsonb(t) @> $1"
+            } else {
+                ""
+            },
             ROW_CAP + 1
         );
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        if let Some(filter) = filter {
+            query = query.bind(filter.clone());
+        }
+        let rows = query.fetch_all(&self.pool).await.map_err(db_err)?;
         if rows.len() > ROW_CAP {
             return Err(StoreError::Harness(format!(
                 "postgres: table `{table}` has more than {ROW_CAP} rows; verify and watch compare rows in memory and would silently miss some"
@@ -1706,6 +1717,18 @@ impl PostgresStore {
         }
         Ok(rows.iter().map(|r| r.get::<Value, _>("r")).collect())
     }
+}
+
+/// A watch entry is a table name or `{table, where}`; `where` scopes the diff
+/// to rows that contain that document.
+fn watch_entry(entry: &Value) -> Result<(&str, Option<&Value>), StoreError> {
+    if let Some(table) = entry.as_str() {
+        return Ok((table, None));
+    }
+    let table = entry.get("table").and_then(Value::as_str).ok_or_else(|| {
+        StoreError::Harness("watch entry must be a table name or {table, where}".into())
+    })?;
+    Ok((table, entry.get("where")))
 }
 
 /// Assignment of actual rows to expected rows runs as maximum bipartite

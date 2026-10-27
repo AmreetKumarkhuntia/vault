@@ -100,7 +100,7 @@ async fn runner(store: Option<Arc<RecordingStore>>) -> TestRunner {
         mock,
         gate: Arc::new(NoopGate),
         abort_run: std::sync::atomic::AtomicBool::new(false),
-        shared_baseline: false,
+        shared_baseline: std::sync::atomic::AtomicBool::new(false),
         exclusive: tokio::sync::RwLock::new(()),
     }
 }
@@ -873,7 +873,9 @@ async fn shared_lane_tests_never_interleave_with_an_exclusive_test() {
         log: Default::default(),
     });
     runner.gate = gate.clone();
-    let exclusive = echo_test();
+    // `watch` is what makes a test exclusive; mock tests overlap by prefix instead.
+    let mut exclusive = echo_test();
+    exclusive.watch = vec![vault_dsl::WatchEntry::Table("orders".into())];
     let reader =
         definition(json!({"test": "reader", "verify": {"postgres": [{"eventually": "2s"}]}}));
     let empty = IndexMap::new();
