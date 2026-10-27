@@ -1885,7 +1885,9 @@ fn serial_tagged_items_run_after_the_lanes_with_their_reset() {
 }
 
 /// A suite whose target is the mock listener itself, so a test's own request is the
-/// outbound call the listener sees. Reports land in the sandbox root.
+/// outbound call the listener sees. Reports land in the sandbox root. File names put
+/// `mocker` first in plan order: the first lane arms its session before the second
+/// lane sends anything, so the caller's stray call always finds `mocker` armed.
 fn mock_target_suite(sandbox: &TempDir) -> PathBuf {
     let suite = sandbox.path().join("suite");
     fs::create_dir_all(&suite).unwrap();
@@ -1902,12 +1904,12 @@ fn mock_target_suite(sandbox: &TempDir) -> PathBuf {
     )
     .unwrap();
     fs::write(
-        suite.join("mocker.test.yaml"),
+        suite.join("a-mocker.test.yaml"),
         "test: mocker\nmocks:\n  platform:\n    stubs:\n      - match: { path: /x }\n        response: { status: 200 }\nverify:\n  settle: 1s\n",
     )
     .unwrap();
     fs::write(
-        suite.join("caller.test.yaml"),
+        suite.join("b-caller.test.yaml"),
         "test: caller\nsteps:\n  - name: stray\n    request: { method: GET, path: /nobody/x }\n    expect: { status: 599 }\n",
     )
     .unwrap();
@@ -2048,21 +2050,21 @@ fn a_flow_stage_candidate_reruns_its_flow_once_and_tail_items_are_not_rerun() {
     let sandbox = TempDir::new("orphan-flow");
     let suite = mock_target_suite(&sandbox);
     fs::copy(
-        suite.join("mocker.test.yaml"),
-        suite.join("mocker2.test.yaml"),
+        suite.join("a-mocker.test.yaml"),
+        suite.join("a-mocker2.test.yaml"),
     )
     .unwrap();
-    let second = fs::read_to_string(suite.join("mocker2.test.yaml"))
+    let second = fs::read_to_string(suite.join("a-mocker2.test.yaml"))
         .unwrap()
         .replace("test: mocker", "test: mocker2");
-    fs::write(suite.join("mocker2.test.yaml"), second).unwrap();
+    fs::write(suite.join("a-mocker2.test.yaml"), second).unwrap();
     fs::write(
         suite.join("chain.flow.yaml"),
         "flow: chain\nstages:\n  - test: mocker\n  - test: mocker2\n",
     )
     .unwrap();
     fs::write(
-        suite.join("caller.test.yaml"),
+        suite.join("b-caller.test.yaml"),
         "test: caller\nsteps:\n  - name: x\n    request: { method: GET, path: /nobody/x }\n    expect: { status: 599 }\n  - name: y\n    request: { method: GET, path: /nobody/y }\n    expect: { status: 599 }\n",
     )
     .unwrap();
