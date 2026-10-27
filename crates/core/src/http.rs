@@ -84,7 +84,7 @@ pub(crate) async fn execute_request_with_evidence(
     // reqwest appends headers; a step header must replace a default of the same name.
     for (k, v) in default_headers {
         if !spec.headers.keys().any(|s| s.eq_ignore_ascii_case(k)) {
-            req = req.header(k, v);
+            req = req.header(k, engine.render_str(v)?);
         }
     }
     for (k, v) in &spec.headers {

@@ -7,16 +7,54 @@ use axum::response::Response;
 use axum::Router;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 
 use crate::record::{RecordedExchange, RecordedRequest};
 use crate::session::{resolve_dep, response_for, Session, SessionGuard};
 use crate::UNMATCHED_STATUS;
 
-type Active = Arc<Mutex<Option<Arc<Session>>>>;
+/// Every armed session plus the mount prefixes currently claimed. Lanes share
+/// one listener, so a request is routed by the longest mount that covers it.
+#[derive(Default)]
+pub(crate) struct Armed {
+    pub(crate) sessions: Vec<Arc<Session>>,
+    held: Vec<String>,
+}
+
+pub(crate) type Active = Arc<Mutex<Armed>>;
 
 pub struct MockServer {
     active: Active,
+    released: Arc<Notify>,
     addr: SocketAddr,
+}
+
+/// Exclusive hold on a set of mount prefixes, released on drop.
+pub struct PrefixClaim {
+    active: Active,
+    released: Arc<Notify>,
+    prefixes: Vec<String>,
+}
+
+impl Drop for PrefixClaim {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .held
+            .retain(|held| !self.prefixes.contains(held));
+        self.released.notify_waiters();
+    }
+}
+
+/// Two mounts overlap when one is a segment-prefix of the other; the root
+/// mount `""` covers every path.
+pub fn mounts_overlap(a: &str, b: &str) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    match long.strip_prefix(short) {
+        Some("") => true,
+        Some(rest) => rest.starts_with('/'),
+        None => false,
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -29,7 +67,7 @@ impl MockServer {
     /// Bound once per run: the black-box target reads its dependency URLs at
     /// startup, so the address must stay stable across tests.
     pub async fn start(bind: &str) -> Result<Self, MockError> {
-        let active: Active = Arc::new(Mutex::new(None));
+        let active: Active = Arc::default();
         let listener = tokio::net::TcpListener::bind(bind)
             .await
             .map_err(|e| MockError::Bind(bind.to_string(), e))?;
@@ -40,20 +78,50 @@ impl MockServer {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        Ok(Self { active, addr })
+        Ok(Self {
+            active,
+            released: Arc::new(Notify::new()),
+            addr,
+        })
     }
 
     pub fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }
 
-    pub fn arm(&self, session: Session) -> SessionGuard {
+    /// Waits until none of `prefixes` overlaps a claimed mount, then holds
+    /// them all. Callers take the claim before their clocks start so queueing
+    /// never counts as test time.
+    pub async fn claim(&self, prefixes: Vec<String>) -> PrefixClaim {
+        loop {
+            // Registered before the check so a release in between is not missed.
+            let released = self.released.notified();
+            {
+                let mut armed = self.active.lock();
+                let conflict = prefixes
+                    .iter()
+                    .any(|p| armed.held.iter().any(|h| mounts_overlap(p, h)));
+                if !conflict {
+                    armed.held.extend(prefixes.iter().cloned());
+                    return PrefixClaim {
+                        active: self.active.clone(),
+                        released: self.released.clone(),
+                        prefixes,
+                    };
+                }
+            }
+            released.await;
+        }
+    }
+
+    pub fn arm(&self, session: Session, claim: PrefixClaim) -> SessionGuard {
         let session = Arc::new(session);
-        *self.active.lock() = Some(session.clone());
+        self.active.lock().sessions.push(session.clone());
         SessionGuard {
             active: self.active.clone(),
             session,
             base_url: self.base_url(),
+            _claim: claim,
         }
     }
 }
@@ -78,15 +146,22 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
     let body = String::from_utf8_lossy(&body_bytes).to_string();
     let body_json = serde_json::from_str(&body).unwrap_or(Value::Null);
 
-    let Some(session) = active.lock().clone() else {
+    let sessions = active.lock().sessions.clone();
+    if sessions.is_empty() {
         return plain(
             UNMATCHED_STATUS,
             json!({"error": "vault-mock: no active session"}),
         );
-    };
+    }
 
-    let Some((dep, rel_path)) = resolve_dep(&session, &path) else {
-        session.record(RecordedExchange {
+    // Claims are exclusive, so at most one armed session mounts any prefix.
+    let owner = sessions
+        .iter()
+        .filter_map(|s| resolve_dep(s, &path).map(|(dep, rel)| (s, dep, rel)))
+        .max_by_key(|(_, dep, _)| dep.prefix.len());
+    let Some((session, dep, rel_path)) = owner else {
+        // No lane owns this path: every armed session sees it, so no lane passes by accident.
+        let unknown = RecordedExchange {
             seq: 0,
             at_unix_ms: now_ms(),
             dependency: "<unknown>".into(),
@@ -101,7 +176,10 @@ async fn handle(State(active): State<Active>, req: Request) -> Response {
             matched_stub: None,
             responded_status: UNMATCHED_STATUS,
             render_error: None,
-        });
+        };
+        for session in &sessions {
+            session.record(unknown.clone());
+        }
         return plain(
             UNMATCHED_STATUS,
             json!({"error": "vault-mock: no dependency prefix matched", "path": uri.path()}),

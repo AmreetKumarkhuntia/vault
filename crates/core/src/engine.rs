@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 use vault_dsl::{Defaults, FlowDef, FlowOnFailure, FlowReset, Step, TestDef};
-use vault_mock::{MockServer, RecordedExchange, Session, SessionGuard};
+use vault_mock::{MockServer, PrefixClaim, RecordedExchange, Session, SessionGuard};
 use vault_store::matchers::{humantime_ms, MatchCtx};
 use vault_store::{StateStore, VerifyOpts, VerifyOutcome};
 
@@ -59,10 +59,10 @@ pub struct TestRunner {
     pub abort_run: std::sync::atomic::AtomicBool,
     /// Set for parallel lanes: [`Self::apply_baseline`] already reset every
     /// store and applied the global seed, so lifecycles only add local seed.
-    pub shared_baseline: bool,
-    /// The mock listener holds one active session and `watch` diffs whole
-    /// tables, so tests that arm mocks, verify calls, or watch take the write
-    /// side; every other test takes a read.
+    pub shared_baseline: std::sync::atomic::AtomicBool,
+    /// `watch` diffs whole tables, so a watch test takes the write side and
+    /// every other test a read. Mock tests overlap: the listener routes each
+    /// call by the mount prefix its test claimed.
     pub exclusive: tokio::sync::RwLock<()>,
 }
 
@@ -157,7 +157,10 @@ impl TestRunner {
         collect_evidence: bool,
         collect_sources: bool,
     ) -> TrackedTestResult {
-        let do_reset = do_reset && !self.shared_baseline;
+        let do_reset = do_reset
+            && !self
+                .shared_baseline
+                .load(std::sync::atomic::Ordering::SeqCst);
         if let Some(reason) = def.skip.reason() {
             let mut evidence = ExecutionCollector::with_sources(collect_evidence, collect_sources);
             let result = TestResult::skipped(&def.test, reason.clone());
@@ -172,12 +175,22 @@ impl TestRunner {
             };
         }
         // Taken before the clocks start so queueing never counts as test time.
-        let (_exclusive, _shared) =
-            if !def.mocks.is_empty() || !def.verify.calls.is_empty() || !def.watch.is_empty() {
-                (Some(self.exclusive.write().await), None)
-            } else {
-                (None, Some(self.exclusive.read().await))
-            };
+        // An unscoped watch diffs whole tables, so it runs alone.
+        let (_exclusive, _shared) = if def.watch.iter().any(|w| !w.is_scoped()) {
+            (Some(self.exclusive.write().await), None)
+        } else {
+            (None, Some(self.exclusive.read().await))
+        };
+        // Mounts come from the raw definition, like `mock.<name>.base_url` does.
+        let claim = self
+            .mock
+            .claim(
+                def.mocks
+                    .iter()
+                    .map(|(name, dep)| dep.mount(name))
+                    .collect(),
+            )
+            .await;
         let mut evidence = ExecutionCollector::with_sources(collect_evidence, collect_sources);
         let started = Instant::now();
         let mut initialization = InitializationProgress::default();
@@ -202,6 +215,7 @@ impl TestRunner {
                 extra_vars,
                 do_reset,
                 flow_scope,
+                claim,
                 &mut result,
                 &mut initialization,
                 &mut evidence,
@@ -237,6 +251,7 @@ impl TestRunner {
         extra_vars: &IndexMap<String, Value>,
         do_reset: bool,
         flow_scope: Option<&Value>,
+        claim: PrefixClaim,
         result: &mut TestResult,
         initialization: &mut InitializationProgress,
         evidence: &mut ExecutionCollector,
@@ -271,7 +286,7 @@ impl TestRunner {
                 "mock": base_urls,
                 "env": std::env::vars().map(|(k, v)| (k, Value::String(v))).collect::<Map<String, Value>>(),
                 "flow": flow_scope.cloned().unwrap_or_else(|| json!({})),
-                "test": {"name": def.test},
+                "test": {"name": def.test, "uid": short_uid(&def.test)},
             }),
             anchor_ms,
         );
@@ -338,7 +353,7 @@ impl TestRunner {
                 json!({"tables": def.watch}),
             );
             let store = self.store("postgres")?;
-            let doc = json!(def.watch);
+            let doc = engine.render_value(&json!(def.watch))?;
             let snapshot = store.snapshot(&doc).await?;
             evidence.complete(event, ExecutionStatus::Passed);
             Some((store.clone(), doc.clone(), snapshot))
@@ -359,16 +374,19 @@ impl TestRunner {
         );
         let rendered_mocks = render_mocks(&engine, def)?;
         let response_engine = engine.clone();
-        let guard = self.mock.arm(Session::new(
-            &def.test,
-            &rendered_mocks,
-            self.defaults.mock.unmatched.clone(),
-            Arc::new(move |response, request| {
-                let mut engine = response_engine.clone();
-                engine.set_flat("request", request);
-                engine.render_value(response).map_err(|e| e.to_string())
-            }),
-        ));
+        let guard = self.mock.arm(
+            Session::new(
+                &def.test,
+                &rendered_mocks,
+                self.defaults.mock.unmatched.clone(),
+                Arc::new(move |response, request| {
+                    let mut engine = response_engine.clone();
+                    engine.set_flat("request", request);
+                    engine.render_value(response).map_err(|e| e.to_string())
+                }),
+            ),
+            claim,
+        );
 
         evidence.session(guard.session());
         evidence.complete(mocks, ExecutionStatus::Passed);
@@ -434,7 +452,14 @@ impl TestRunner {
             let store = self.store(kind)?;
             let rendered = engine.render_value(doc)?;
             let outcome = self
-                .poll_verify(store.as_ref(), &rendered, anchor_ms, evidence, event)
+                .poll_verify(
+                    store.as_ref(),
+                    &rendered,
+                    anchor_ms,
+                    self.settle_for(def),
+                    evidence,
+                    event,
+                )
                 .await?;
             evidence.checks(event, &outcome);
             evidence.complete(
@@ -470,8 +495,16 @@ impl TestRunner {
         }
 
         if !def.verify.calls.is_empty() || !def.mocks.is_empty() {
-            let quiet = evidence.start("mock_quiet", &def.test, None, 1, json!({}));
-            self.wait_for_mock_quiet(&guard, steps_done_ms).await;
+            let settle = self.settle_for(def);
+            let quiet = evidence.start(
+                "mock_quiet",
+                &def.test,
+                None,
+                1,
+                json!({"settle_ms": settle.as_millis() as u64}),
+            );
+            self.wait_for_mock_quiet(&guard, steps_done_ms, settle)
+                .await;
             evidence.complete(quiet, ExecutionStatus::Passed);
             let event = evidence.start("verify_calls", &def.test, None, 1, json!({}));
             let report = guard.drain();
@@ -508,6 +541,21 @@ impl TestRunner {
             );
             verify.merge(call_outcome);
             if result.status != TestStatus::Passed || !verify.passed() {
+                result.recorded_calls = report
+                    .recordings
+                    .iter()
+                    .map(|r| r.to_report_value())
+                    .collect();
+            }
+        } else {
+            // No mocks, so no quiet-wait: anything recorded by now is a call nobody declared.
+            let report = guard.drain();
+            if !report.unmatched_hits.is_empty() {
+                let event = evidence.start("verify_calls", &def.test, None, 1, json!({}));
+                let outcome = vault_mock::verify_undeclared(&report);
+                evidence.checks(event, &outcome);
+                evidence.complete(event, ExecutionStatus::Failed);
+                verify.merge(outcome);
                 result.recorded_calls = report
                     .recordings
                     .iter()
@@ -652,10 +700,10 @@ impl TestRunner {
         store: &dyn StateStore,
         doc: &Value,
         anchor_ms: i64,
+        settle: Duration,
         evidence: &mut ExecutionCollector,
         event: Option<usize>,
     ) -> Result<VerifyOutcome, CoreError> {
-        let settle = self.defaults.verify.settle;
         let interval = self.defaults.verify.poll_interval;
         let deadline_ms = max_eventually_ms(doc)?;
         let opts = VerifyOpts {
@@ -723,18 +771,30 @@ impl TestRunner {
         }
     }
 
-    async fn wait_for_mock_quiet(&self, guard: &SessionGuard, steps_done_ms: u64) {
-        let settle = self.defaults.verify.settle.as_millis() as u64;
-        let budget = Instant::now() + Duration::from_millis((settle * 4).max(2000));
+    fn settle_for(&self, def: &TestDef) -> Duration {
+        def.verify.settle.unwrap_or(self.defaults.verify.settle)
+    }
+
+    async fn wait_for_mock_quiet(
+        &self,
+        guard: &SessionGuard,
+        steps_done_ms: u64,
+        settle: Duration,
+    ) {
+        let settle_ms = settle.as_millis() as u64;
+        let budget = Instant::now() + Duration::from_millis((settle_ms * 4).max(2000));
         loop {
             // Quiet is measured from the later of the last recording and the end of
             // the steps, so a test that recorded nothing still waits out late calls.
             let last = guard.last_recorded_at_ms().max(steps_done_ms);
-            let now = now_ms() as u64;
-            if now.saturating_sub(last) >= settle || Instant::now() >= budget {
+            let quiet_ms = (now_ms() as u64).saturating_sub(last);
+            if quiet_ms >= settle_ms || Instant::now() >= budget {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Sleep out the rest of the window; a new call moves `last`, so loop.
+            let remaining = Duration::from_millis(settle_ms - quiet_ms);
+            tokio::time::sleep(remaining.min(budget.saturating_duration_since(Instant::now())))
+                .await;
         }
     }
 
@@ -909,8 +969,10 @@ impl TestRunner {
         let mut isolation_invalid = false;
 
         for (stage_index, stage) in flow.stages.iter().enumerate() {
-            let do_reset =
-                !self.shared_baseline && (flow.reset == FlowReset::Each || reset_pending);
+            let do_reset = !self
+                .shared_baseline
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && (flow.reset == FlowReset::Each || reset_pending);
             let Some(def) = tests.get(&stage.test) else {
                 let result =
                     TestResult::skipped(&stage.test, "unknown test referenced by flow".into());
@@ -969,7 +1031,12 @@ impl TestRunner {
                 continue;
             }
 
-            let scope = Value::Object(flow_scope.clone());
+            // Exports are added after the identity keys, so an export named `uid` wins.
+            let mut scope = Map::new();
+            scope.insert("name".into(), json!(flow.flow));
+            scope.insert("uid".into(), json!(short_uid(&flow.flow)));
+            scope.extend(flow_scope.clone());
+            let scope = Value::Object(scope);
             let with_engine = TemplateEngine::new(json!({"flow": scope.clone()}), now_ms());
             let mut extra = IndexMap::new();
             let mut with_error = None;
@@ -1069,6 +1136,14 @@ struct TrackedTestResult {
 pub struct FlowOutcome {
     pub name: String,
     pub results: Vec<TestResult>,
+}
+
+/// Stable eight-hex-character id for a name; the same across runs and machines.
+fn short_uid(name: &str) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes())
+        .simple()
+        .to_string()[..8]
+        .to_string()
 }
 
 fn render_mocks(

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use vault_store::CheckResult;
 use vault_store::{DocMode, StateStore, StoreConnConfig, StoreDriver, VerifyOpts};
 use vault_store_postgres::PostgresDriver;
 
@@ -156,4 +157,43 @@ async fn schema_qualified_and_mixed_case_tables_are_addressable() {
         "{:?}",
         outcome.failures().collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires VAULT_PG_URL (CI provides the PostgreSQL service)"]
+async fn scoped_watch_diffs_only_rows_matching_the_filter() {
+    let _serial = LIVE.lock().await;
+    let url = live_url();
+    let pool = PgPool::connect(&url).await.unwrap();
+    sqlx::raw_sql(
+        "DROP TABLE IF EXISTS vault_watch_scoped;\
+         CREATE TABLE vault_watch_scoped (id INT PRIMARY KEY, shop TEXT);\
+         INSERT INTO vault_watch_scoped VALUES (1, 'a'), (2, 'b');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let store = live_store(&url).await;
+    let scoped = json!([{ "table": "vault_watch_scoped", "where": { "shop": "a" } }]);
+    let whole = json!(["vault_watch_scoped"]);
+    let before_scoped = store.snapshot(&scoped).await.unwrap();
+    let before_whole = store.snapshot(&whole).await.unwrap();
+
+    sqlx::raw_sql("INSERT INTO vault_watch_scoped VALUES (3, 'a'), (4, 'b')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let failures = |outcome: &vault_store::VerifyOutcome| {
+        outcome
+            .checks
+            .iter()
+            .filter(|c| matches!(c, CheckResult::Fail(_)))
+            .count()
+    };
+    let scoped_diff = store.diff_snapshot(&scoped, &before_scoped).await.unwrap();
+    let whole_diff = store.diff_snapshot(&whole, &before_whole).await.unwrap();
+    assert_eq!(failures(&scoped_diff), 1, "{scoped_diff:?}");
+    assert_eq!(failures(&whole_diff), 2, "{whole_diff:?}");
+    assert!(store.snapshot(&json!([{ "where": {} }])).await.is_err());
 }

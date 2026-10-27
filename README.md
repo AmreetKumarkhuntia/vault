@@ -392,6 +392,8 @@ on_failure: skip-rest        # a failed stage marks the rest SKIPPED, never sile
 
 Referenced tests stay independently runnable (their `vars:` provide defaults; `with:` overrides). A `{{ flow.* }}` reference no earlier stage exports is a static validation error.
 
+Every stage also sees `flow.name` and `flow.uid`, a stable eight-character hash of the flow name, and every test sees `test.uid`; use them for keys that must not collide between lanes. `defaults.request.headers` render with the same context as step headers, so `X-Session-Id: "vault-{{ flow.uid }}"` sends a per-flow value.
+
 ## Repository layout
 
 ```
@@ -429,10 +431,17 @@ Above 1 lane, isolation moves from each test to the whole run:
 - Every store is reset and the suite-global `seed` is applied once, before the first item.
 - Items never reset. `reset: once`, `reset: each`, and standalone resets are skipped, and each
   test applies only its local `seed` on top of the shared baseline.
-- Tests that declare `mocks`, `verify.calls`, or `watch` run alone. The target reaches one fixed
-  mock URL, so lanes cannot tell their outbound calls apart, and `watch` diffs whole tables. Other
-  lanes wait while such a test runs.
+- The target reaches one fixed mock URL, so the listener routes each outbound call by the mount
+  prefix that covers its path. A test claims every prefix it mocks before it starts; two tests
+  whose prefixes overlap (`/platform` and `/platform/s`, or any prefix and the root mount) run one
+  after the other, and the wait is not counted as test time. A call to a prefix no running test
+  mocks is recorded as `<unknown>` in every running test.
+- Tests that declare `watch` run alone, because `watch` diffs whole tables. Other lanes wait while
+  such a test runs.
 - `--step` requires serial execution and is rejected with `--parallel` above 1.
+- `--serial-tag TAG` (repeatable) keeps items carrying that tag out of the lanes. They run after
+  every lane has finished, one at a time, with the per-item reset of a serial run. Use it for the
+  few flows that change global state.
 
 The global seed renders once for the whole run, not once per test:
 
@@ -475,7 +484,15 @@ CI, coverage, and application behavior.
   and JSON reports keep that order.
 - A test that declares `mocks` or `verify.calls` waits, after its last step, until no outbound
   call has arrived for `verify.settle` (default 500ms, capped at 4× that or 2s), so late calls
-  are counted. Tests that record no calls now pay that wait too.
+  are counted. Tests that record no calls now pay that wait too. A test can set its own
+  `verify.settle` to shorten or lengthen that window; the HTML report shows the value it used.
+- A `watch` entry can be scoped: `{table: cart, where: {shop_id: "{{ vars.shop_id }}"}}` diffs
+  only rows that contain that document (jsonb containment, so equality on scalars). A test whose
+  watch entries are all scoped does not block other lanes, but a scoped watch no longer proves
+  that nothing else in the table changed.
+- A test that declares no `mocks` fails with `undeclared outbound call` when the target still
+  reaches the mock listener during it; it pays no settle wait. `defaults.mock.unmatched: allow`
+  keeps those calls silent.
 - Fields and headers whose name ends in `password`, `passwd`, `secret`, `token`, `apikey`,
   `authorization`, `cookie`, `privatekey` or `passphrase` are masked in reports by default.
 - Ctrl-C or SIGTERM during `vault run` still writes the reports for finished items and exits `130`.

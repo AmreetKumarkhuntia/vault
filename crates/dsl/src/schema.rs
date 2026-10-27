@@ -210,9 +210,10 @@ pub struct TestDef {
     pub timeout: Duration,
     #[serde(default)]
     pub vars: IndexMap<String, Json>,
-    /// Tables to watch for unexpected changes (postgres watch mode).
+    /// Tables to watch for unexpected changes (postgres watch mode). A scoped
+    /// entry diffs only the rows that contain its `where` document.
     #[serde(default)]
-    pub watch: Vec<String>,
+    pub watch: Vec<WatchEntry>,
     /// Seed docs keyed by store kind. Driver-owned schema.
     #[serde(default)]
     pub seed: IndexMap<String, Json>,
@@ -226,6 +227,25 @@ pub struct TestDef {
 
 fn default_test_timeout() -> Duration {
     Duration::from_secs(60)
+}
+
+/// `watch: [cart]` diffs the whole table; `{table: cart, where: {shop_id: 1}}`
+/// diffs only matching rows, so lanes can watch the same table at once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WatchEntry {
+    Table(String),
+    Scoped {
+        table: String,
+        #[serde(rename = "where")]
+        filter: IndexMap<String, Json>,
+    },
+}
+
+impl WatchEntry {
+    pub fn is_scoped(&self) -> bool {
+        matches!(self, WatchEntry::Scoped { .. })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -464,6 +484,9 @@ pub struct VerifyBlock {
     pub ordered: Vec<Vec<String>>,
     #[serde(default)]
     pub unexpected: Option<UnmatchedPolicy>,
+    /// Overrides `defaults.verify.settle` for this test's quiet-wait and re-checks.
+    #[serde(default, with = "humantime_serde::option")]
+    pub settle: Option<Duration>,
     /// Store verify docs keyed by kind (postgres, redis, …). Driver-owned.
     #[serde(flatten)]
     pub stores: IndexMap<String, Json>,

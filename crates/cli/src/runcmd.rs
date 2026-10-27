@@ -26,6 +26,7 @@ pub struct RunArgs {
     pub shuffle: bool,
     pub seed: Option<u64>,
     pub parallel: usize,
+    pub serial_tags: Vec<String>,
     pub report: Option<String>,
     pub junit: Option<String>,
     pub html: Option<String>,
@@ -842,10 +843,10 @@ async fn run_async<'s>(
         mock,
         gate,
         abort_run: std::sync::atomic::AtomicBool::new(false),
-        shared_baseline: args.parallel > 1,
+        shared_baseline: std::sync::atomic::AtomicBool::new(args.parallel > 1),
         exclusive: tokio::sync::RwLock::new(()),
     };
-    if runner.shared_baseline {
+    if args.parallel > 1 {
         println!(
             "{} parallel lanes: {} (stores reset and global seed applied once)",
             "→".cyan(),
@@ -869,6 +870,43 @@ async fn run_async<'s>(
     enum Item<'s> {
         Test(&'s vault_dsl::LoadedTest),
         Flow(&'s vault_dsl::LoadedFlow),
+    }
+    impl Item<'_> {
+        fn tags(&self) -> &[String] {
+            match self {
+                Item::Test(t) => &t.def.tags,
+                Item::Flow(f) => &f.def.tags,
+            }
+        }
+    }
+    // One item's results and evidence, whether it runs in a lane or in the serial tail.
+    async fn run_item(
+        runner: &TestRunner,
+        item: &Item<'_>,
+        tests_by_name: &HashMap<String, &vault_dsl::TestDef>,
+        collect_evidence: bool,
+    ) -> (Vec<TestResult>, Vec<vault_core::TestExecution>) {
+        match item {
+            Item::Test(t) => {
+                let (result, evidence) = runner
+                    .run_test_for_reporting(
+                        &t.def,
+                        &IndexMap::new(),
+                        true,
+                        None,
+                        None,
+                        collect_evidence,
+                    )
+                    .await;
+                (vec![result], vec![evidence])
+            }
+            Item::Flow(f) => {
+                let (outcome, evidence) = runner
+                    .run_flow_for_reporting(&f.def, tests_by_name, collect_evidence)
+                    .await;
+                (outcome.results, evidence)
+            }
+        }
     }
     let Plan { flows, standalone } = plan;
     let mut items: Vec<Item> = flows
@@ -943,32 +981,26 @@ async fn run_async<'s>(
         duration_ms: 0,
     };
 
-    let empty = IndexMap::new();
-    let (runner, empty, tests_by_name) = (&runner, &empty, &tests_by_name);
+    let (runner, tests_by_name) = (&runner, &tests_by_name);
+    // Items with a serial tag stay out of the lanes and run afterwards, one at a time.
+    let is_serial =
+        |item: &Item| args.parallel > 1 && item.tags().iter().any(|t| args.serial_tags.contains(t));
     // Items start in plan order with at most `parallel` in flight; each result lands in
     // its plan slot whatever finishes first, so reports stay deterministic.
-    let mut lanes = futures_util::stream::iter(items.iter().enumerate())
-        .map(|(index, item)| async move {
-            if runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
-                return (index, None);
-            }
-            let output = match item {
-                Item::Test(t) => {
-                    let (result, evidence) = runner
-                        .run_test_for_reporting(&t.def, empty, true, None, None, collect_evidence)
-                        .await;
-                    (vec![result], vec![evidence])
-                }
-                Item::Flow(f) => {
-                    let (outcome, evidence) = runner
-                        .run_flow_for_reporting(&f.def, tests_by_name, collect_evidence)
-                        .await;
-                    (outcome.results, evidence)
-                }
-            };
-            (index, Some(output))
-        })
-        .buffer_unordered(args.parallel.max(1));
+    let mut lanes = futures_util::stream::iter(
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !is_serial(item)),
+    )
+    .map(|(index, item)| async move {
+        if runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
+            return (index, None);
+        }
+        let output = run_item(runner, item, tests_by_name, collect_evidence).await;
+        (index, Some(output))
+    })
+    .buffer_unordered(args.parallel.max(1));
     let mut outputs = Vec::new();
     outputs.resize_with(items.len(), || None);
     // --step blocks the main thread at its prompt, so a signal handler could never be
@@ -997,6 +1029,21 @@ async fn run_async<'s>(
         }
     }
     drop(lanes);
+    // The shared baseline is over, so tail items reset like a serial run.
+    runner
+        .shared_baseline
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    for (index, item) in items.iter().enumerate().filter(|(_, item)| is_serial(item)) {
+        if interrupted || runner.abort_run.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::select! {
+            output = run_item(runner, item, tests_by_name, collect_evidence) => {
+                outputs[index] = Some(output);
+            }
+            _ = &mut interrupt => interrupted = true,
+        }
+    }
     let unfinished = outputs.iter().filter(|output| output.is_none()).count();
 
     let mut executions = Vec::new();
@@ -1046,7 +1093,7 @@ async fn run_async<'s>(
     let mut metadata = json!({
         "started_at": started_at, "suite": suite.root.display().to_string(),
         "pattern": args.pattern, "tags": args.tags, "shuffle_seed": shuffle_seed,
-        "parallel": args.parallel,
+        "parallel": args.parallel, "serial_tags": args.serial_tags,
         "items": report_items, "tests": report_tests,
     });
     // Discover across all surfaces before masking: a captured credential may

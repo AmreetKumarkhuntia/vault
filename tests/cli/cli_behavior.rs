@@ -1822,3 +1822,64 @@ fn sigterm_mid_run_still_writes_reports_and_exits_130() {
         "the unfinished test must appear as skipped:\n{json}"
     );
 }
+
+#[test]
+fn serial_tagged_items_run_after_the_lanes_with_their_reset() {
+    let sandbox = TempDir::new("parallel-serial-tail");
+    let server = HttpServer::start();
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    fs::copy(
+        fixture("reporting").join("vault.yaml"),
+        suite.join("vault.yaml"),
+    )
+    .unwrap();
+    for (name, tags) in [
+        ("alpha", ""),
+        ("bravo", "tags: [global]\n"),
+        ("charlie", ""),
+    ] {
+        fs::write(
+            suite.join(format!("{name}.test.yaml")),
+            format!("test: {name}\n{tags}steps:\n  - name: {name} request\n    request: {{ method: GET, path: /pass }}\n    expect: {{ status: 200 }}\n"),
+        )
+        .unwrap();
+    }
+
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .args(["--parallel", "2", "--serial-tag", "global"])
+        .env(TARGET_URL_ENV, server.url());
+    assert_exit(&output(&mut command), 0);
+
+    let html = html_data(&sandbox.path().join("config-report.html"));
+    assert_eq!(
+        html["metadata"]["serial_tags"],
+        serde_json::json!(["global"])
+    );
+    let reset_boundary = |name: &str| -> bool {
+        let test = html["metadata"]["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap();
+        let execution = &html["executions"][test["execution_index"].as_u64().unwrap() as usize];
+        execution["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["phase"] == "preparation")
+            .unwrap()["details"]["reset_boundary"]
+            == true
+    };
+    assert!(!reset_boundary("alpha"));
+    assert!(
+        reset_boundary("bravo"),
+        "the tagged item resets like a serial run"
+    );
+    assert!(!reset_boundary("charlie"));
+}

@@ -315,3 +315,17 @@ verify:
         assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
     }
 }
+
+#[test]
+fn watch_entries_are_plain_tables_or_scoped() {
+    let raw =
+        "test: w\nwatch:\n  - cart\n  - { table: cart, where: { shop_id: \"{{ vars.shop }}\" } }\n";
+    let def: TestDef = parse_str(raw, "inline").unwrap();
+    assert_eq!(def.watch.len(), 2);
+    assert!(!def.watch[0].is_scoped());
+    assert!(def.watch[1].is_scoped());
+    assert_eq!(
+        serde_json::to_value(&def.watch).unwrap(),
+        serde_json::json!(["cart", {"table": "cart", "where": {"shop_id": "{{ vars.shop }}"}}])
+    );
+}

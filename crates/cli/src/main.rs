@@ -47,6 +47,9 @@ enum Command {
         /// Run up to N flows/standalone tests at once; above 1, stores reset and the global seed applies once per run
         #[arg(long, default_value_t = 1, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
         parallel: usize,
+        /// With --parallel above 1, items carrying this tag run after the lanes, one at a time, with their normal reset (repeatable)
+        #[arg(long = "serial-tag", value_name = "TAG")]
+        serial_tag: Vec<String>,
         /// Write the JSON report here (overrides config)
         #[arg(long)]
         report: Option<String>,
@@ -117,6 +120,7 @@ fn main() {
             shuffle,
             seed,
             parallel,
+            serial_tag,
             report,
             junit,
             html,
@@ -130,6 +134,7 @@ fn main() {
             shuffle,
             seed,
             parallel,
+            serial_tags: serial_tag,
             report,
             junit,
             html,

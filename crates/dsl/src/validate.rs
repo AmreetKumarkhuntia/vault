@@ -82,7 +82,8 @@ pub fn validate_suite(suite: &Suite) -> Vec<ValidationIssue> {
                     });
                 }
                 for var in find_flow_refs(&serde_json::to_string(v).unwrap_or_default()) {
-                    if !exported.contains(&var) {
+                    // `flow.uid` and `flow.name` are always present.
+                    if !matches!(var.as_str(), "uid" | "name") && !exported.contains(&var) {
                         issues.push(ValidationIssue {
                             origin: origin.clone(),
                             message: format!(

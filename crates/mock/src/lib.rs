@@ -14,9 +14,9 @@ pub mod session;
 pub mod verify;
 
 pub use record::{RecordedExchange, RecordedRequest};
-pub use server::MockServer;
+pub use server::{mounts_overlap, MockServer, PrefixClaim};
 pub use session::{ResponseRenderer, Session, SessionGuard, SessionReport};
-pub use verify::verify_calls;
+pub use verify::{verify_calls, verify_undeclared};
 
 /// Status served when no stub matches and the dependency's policy is `fail`.
 pub const UNMATCHED_STATUS: u16 = 599;
