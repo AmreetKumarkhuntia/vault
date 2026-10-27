@@ -329,3 +329,85 @@ fn watch_entries_are_plain_tables_or_scoped() {
         serde_json::json!(["cart", {"table": "cart", "where": {"shop_id": "{{ vars.shop }}"}}])
     );
 }
+
+#[test]
+fn no_calls_entries_parse_and_conflicting_declarations_are_rejected() {
+    let t: TestDef = parse_str(
+        "test: f\nverify:\n  no_calls:\n    - euler\n    - { dependency: platform, prefix: /platform/s/ }\n",
+        "inline",
+    )
+    .unwrap();
+    assert_eq!(t.verify.no_calls.len(), 2);
+    assert_eq!(t.verify.no_calls[0].dependency(), "euler");
+    assert_eq!(t.verify.no_calls[0].mount(), "/euler");
+    assert_eq!(t.verify.no_calls[1].dependency(), "platform");
+    assert_eq!(t.verify.no_calls[1].mount(), "/platform/s");
+
+    let bad: TestDef = parse_str(
+        r#"
+test: bad
+mocks:
+  euler: {}
+  platform:
+    stubs:
+      - match: { path: /x }
+        response: { status: 200 }
+verify:
+  no_calls:
+    - euler
+    - { dependency: arch, prefix: /platform/arch }
+"#,
+        "inline",
+    )
+    .unwrap();
+    let text = validate_suite(&suite_with(vec![bad], vec![]))
+        .iter()
+        .map(|i| i.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("verify.no_calls[0]: `euler` is also declared under mocks"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "verify.no_calls[1]: `/platform/arch` lies inside the stubbed mount `/platform`"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_duplicate_no_calls_dependency_is_rejected_and_serial_needs_a_reason() {
+    let dup: TestDef = parse_str(
+        "test: dup\nverify:\n  no_calls:\n    - { dependency: platform, prefix: /platform/s }\n    - { dependency: platform, prefix: /platform/w }\n",
+        "inline",
+    )
+    .unwrap();
+    let text = validate_suite(&suite_with(vec![dup], vec![]))
+        .iter()
+        .map(|i| i.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("verify.no_calls[1]: `platform` is already forbidden at /platform/s; give each mount its own name"),
+        "{text}"
+    );
+
+    let serial: TestDef = parse_str("test: s\nserial: touches GLOBAL_CONFIG\n", "inline").unwrap();
+    assert_eq!(serial.serial.as_deref(), Some("touches GLOBAL_CONFIG"));
+    let empty: TestDef = parse_str("test: e\nserial: \"\"\n", "inline").unwrap();
+    let flow: FlowDef =
+        parse_str("flow: f\nserial: \"\"\nstages:\n  - test: s\n", "inline").unwrap();
+    let text = validate_suite(&suite_with(vec![empty, serial], vec![flow]))
+        .iter()
+        .map(|i| i.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        text.matches("serial: give a reason, or remove the field")
+            .count(),
+        2,
+        "{text}"
+    );
+}

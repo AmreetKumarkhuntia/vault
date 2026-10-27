@@ -42,6 +42,12 @@ pub fn validate_suite(suite: &Suite) -> Vec<ValidationIssue> {
     let mut flow_names = HashSet::new();
     for f in &suite.flows {
         let origin = f.path.display().to_string();
+        if f.def.serial.as_deref() == Some("") {
+            issues.push(ValidationIssue {
+                origin: origin.clone(),
+                message: "serial: give a reason, or remove the field".into(),
+            });
+        }
         if !flow_names.insert(f.def.flow.clone()) {
             issues.push(ValidationIssue {
                 origin: origin.clone(),
@@ -214,6 +220,48 @@ fn validate_test(def: &TestDef, origin: &str, issues: &mut Vec<ValidationIssue>)
         }
     }
 
+    if def.serial.as_deref() == Some("") {
+        issues.push(ValidationIssue {
+            origin: origin.into(),
+            message: "serial: give a reason, or remove the field".into(),
+        });
+    }
+
+    // One dependency name is one mount, as in `mocks`.
+    let mut forbidden: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    for (i, forbid) in def.verify.no_calls.iter().enumerate() {
+        let at = format!("verify.no_calls[{i}]");
+        let dep_name = forbid.dependency();
+        if let Some(earlier) = forbidden.insert(dep_name, forbid.mount()) {
+            issues.push(ValidationIssue {
+                origin: origin.into(),
+                message: format!(
+                    "{at}: `{dep_name}` is already forbidden at {earlier}; give each mount its own name"
+                ),
+            });
+        }
+        if def.mocks.contains_key(dep_name) {
+            issues.push(ValidationIssue {
+                origin: origin.into(),
+                message: format!(
+                    "{at}: `{dep_name}` is also declared under mocks; keep `mocks.{dep_name}` empty, or use verify.calls with count: 0 for one endpoint of a stubbed dependency"
+                ),
+            });
+        }
+        let mount = forbid.mount();
+        for (name, dep) in &def.mocks {
+            if !dep.stubs.is_empty() && inside(&mount, &dep.mount(name)) {
+                issues.push(ValidationIssue {
+                    origin: origin.into(),
+                    message: format!(
+                        "{at}: `{mount}` lies inside the stubbed mount `{}` of mocks.{name}; use verify.calls with count: 0 for an endpoint that must not be hit",
+                        dep.mount(name)
+                    ),
+                });
+            }
+        }
+    }
+
     // A stub that cannot answer is skipped at serve time and surfaces as a
     // misleading "no stub matched".
     let mut mounts = HashSet::new();
@@ -354,4 +402,13 @@ fn find_refs(s: &str, ns: &str) -> Vec<String> {
         rest = &after[close + 2..];
     }
     out
+}
+
+/// `mount` equals `outer` or sits under it at a segment boundary; the root mount contains all.
+fn inside(mount: &str, outer: &str) -> bool {
+    match mount.strip_prefix(outer) {
+        Some("") => true,
+        Some(rest) => rest.starts_with('/'),
+        None => false,
+    }
 }

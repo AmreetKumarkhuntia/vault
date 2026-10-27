@@ -82,6 +82,12 @@ pub struct RunResult {
     pub environment: String,
     pub tests: Vec<TestResult>,
     pub duration_ms: u64,
+    /// Outbound calls no armed test claimed during the parallel phase.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<vault_mock::Orphan>,
+    /// Items re-run one at a time after the lanes, with their first attempt.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reruns: Vec<Value>,
 }
 
 impl RunResult {

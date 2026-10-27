@@ -63,7 +63,7 @@ LOAD ─▶ VALIDATE ─▶ RESET ─▶ SEED ─▶ ARM_MOCKS ─▶ RUN_STEPS 
 
 **Run-level preflight:** before test 1, probe target health endpoint, Postgres, Redis, and bind the mock listener. Any probe failure → exit 3 immediately with a reachability table. Never let 40 tests each time out against a target that isn't running.
 
-**Status lattice:** `PASSED < FAILED < ERRORED` per test; run status = worst. Execution is **serial by default** (one target, one DB — see risks). `run --parallel N` overlaps up to N flows/standalone tests: stores reset and the global seed applies once per run, items add only local seed, `watch` tests hold an exclusive lock because watch diffs whole tables, and mock tests claim their mount prefixes so the listener can route each call to the session that mounts it.
+**Status lattice:** `PASSED < FAILED < ERRORED` per test; run status = worst. Execution is **serial by default** (one target, one DB — see risks). `run --parallel N` overlaps up to N flows/standalone tests: stores reset and the global seed applies once per run, items add only local seed, `watch` tests hold an exclusive lock because watch diffs whole tables, and mock tests claim their mount prefixes (stubbed mounts exclusive, forbidden mounts shared, granted in arrival order) so the listener can route each call to the session that mounts it; above one lane an unclaimed call goes to an orphan log and every candidate item is re-run serially after the lanes and the `serial:` tail.
 
 ---
 

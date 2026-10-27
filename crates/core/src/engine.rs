@@ -4,8 +4,12 @@ use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
-use vault_dsl::{Defaults, FlowDef, FlowOnFailure, FlowReset, Step, TestDef};
-use vault_mock::{MockServer, PrefixClaim, RecordedExchange, Session, SessionGuard};
+use vault_dsl::{
+    Defaults, FlowDef, FlowOnFailure, FlowReset, MockDep, Step, TestDef, UnmatchedPolicy,
+};
+use vault_mock::{
+    claim_mode, Claim, ClaimMode, MockServer, PrefixClaim, RecordedExchange, Session, SessionGuard,
+};
 use vault_store::matchers::{humantime_ms, MatchCtx};
 use vault_store::{StateStore, VerifyOpts, VerifyOutcome};
 
@@ -182,15 +186,21 @@ impl TestRunner {
             (None, Some(self.exclusive.read().await))
         };
         // Mounts come from the raw definition, like `mock.<name>.base_url` does.
-        let claim = self
-            .mock
-            .claim(
-                def.mocks
-                    .iter()
-                    .map(|(name, dep)| dep.mount(name))
-                    .collect(),
-            )
-            .await;
+        let claims = def
+            .mocks
+            .iter()
+            .map(|(name, dep)| Claim {
+                prefix: dep.mount(name),
+                mode: claim_mode(dep, &self.defaults.mock.unmatched),
+            })
+            .chain(def.verify.no_calls.iter().map(|forbid| Claim {
+                prefix: forbid.mount(),
+                mode: ClaimMode::Forbid,
+            }))
+            .collect();
+        let queued = Instant::now();
+        let claim = self.mock.claim(claims).await;
+        let claim_wait_ms = queued.elapsed().as_millis() as u64;
         let mut evidence = ExecutionCollector::with_sources(collect_evidence, collect_sources);
         let started = Instant::now();
         let mut initialization = InitializationProgress::default();
@@ -216,6 +226,7 @@ impl TestRunner {
                 do_reset,
                 flow_scope,
                 claim,
+                claim_wait_ms,
                 &mut result,
                 &mut initialization,
                 &mut evidence,
@@ -252,6 +263,7 @@ impl TestRunner {
         do_reset: bool,
         flow_scope: Option<&Value>,
         claim: PrefixClaim,
+        claim_wait_ms: u64,
         result: &mut TestResult,
         initialization: &mut InitializationProgress,
         evidence: &mut ExecutionCollector,
@@ -261,7 +273,7 @@ impl TestRunner {
             &def.test,
             None,
             0,
-            json!({"reset_boundary": do_reset}),
+            json!({"reset_boundary": do_reset, "claim_wait_ms": claim_wait_ms}),
         );
         let anchor_ms = now_ms();
         let match_ctx = MatchCtx {
@@ -370,23 +382,32 @@ impl TestRunner {
             &def.test,
             None,
             1,
-            json!({"dependencies": def.mocks.keys().collect::<Vec<_>>()}),
+            json!({"dependencies": def.mocks.keys().collect::<Vec<_>>(), "claims": claim.claims()}),
         );
-        let rendered_mocks = render_mocks(&engine, def)?;
+        let mut rendered_mocks = render_mocks(&engine, def)?;
+        // A forbidden dependency is an empty mount that fails on any call.
+        for forbid in &def.verify.no_calls {
+            rendered_mocks
+                .entry(forbid.dependency().to_string())
+                .or_insert_with(|| MockDep {
+                    prefix: Some(forbid.mount()),
+                    unmatched: Some(UnmatchedPolicy::Fail),
+                    stubs: vec![],
+                });
+        }
         let response_engine = engine.clone();
-        let guard = self.mock.arm(
-            Session::new(
-                &def.test,
-                &rendered_mocks,
-                self.defaults.mock.unmatched.clone(),
-                Arc::new(move |response, request| {
-                    let mut engine = response_engine.clone();
-                    engine.set_flat("request", request);
-                    engine.render_value(response).map_err(|e| e.to_string())
-                }),
-            ),
-            claim,
+        let mut session = Session::new(
+            &def.test,
+            &rendered_mocks,
+            self.defaults.mock.unmatched.clone(),
+            Arc::new(move |response, request| {
+                let mut engine = response_engine.clone();
+                engine.set_flat("request", request);
+                engine.render_value(response).map_err(|e| e.to_string())
+            }),
         );
+        session.flow = result.flow.clone();
+        let guard = self.mock.arm(session, claim);
 
         evidence.session(guard.session());
         evidence.complete(mocks, ExecutionStatus::Passed);
@@ -494,7 +515,8 @@ impl TestRunner {
             verify.merge(outcome);
         }
 
-        if !def.verify.calls.is_empty() || !def.mocks.is_empty() {
+        if !def.verify.calls.is_empty() || !def.mocks.is_empty() || !def.verify.no_calls.is_empty()
+        {
             let settle = self.settle_for(def);
             let quiet = evidence.start(
                 "mock_quiet",
@@ -548,20 +570,14 @@ impl TestRunner {
                     .collect();
             }
         } else {
-            // No mocks, so no quiet-wait: anything recorded by now is a call nobody declared.
-            let report = guard.drain();
-            if !report.unmatched_hits.is_empty() {
-                let event = evidence.start("verify_calls", &def.test, None, 1, json!({}));
-                let outcome = vault_mock::verify_undeclared(&report);
-                evidence.checks(event, &outcome);
-                evidence.complete(event, ExecutionStatus::Failed);
-                verify.merge(outcome);
-                result.recorded_calls = report
-                    .recordings
-                    .iter()
-                    .map(|r| r.to_report_value())
-                    .collect();
-            }
+            // No mocks: nothing to verify and no quiet-wait, but what the target called is
+            // still worth seeing in the report.
+            result.recorded_calls = guard
+                .drain()
+                .recordings
+                .iter()
+                .map(|r| r.to_report_value())
+                .collect();
         }
 
         if !verify.passed() {

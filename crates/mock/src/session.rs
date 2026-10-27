@@ -16,6 +16,8 @@ pub type ResponseRenderer = Arc<dyn Fn(&Value, Value) -> Result<Value, String> +
 /// Per-test mock state: the armed stub table plus the recording log.
 pub struct Session {
     pub key: String,
+    /// Flow the test runs in, so an orphan candidate maps back to its item.
+    pub flow: Option<String>,
     pub deps: IndexMap<String, ArmedDep>,
     pub default_unmatched: UnmatchedPolicy,
     pub log: Mutex<Vec<RecordedExchange>>,
@@ -30,6 +32,7 @@ pub struct ArmedDep {
     pub prefix: String,
     pub unmatched: Option<UnmatchedPolicy>,
     pub stubs: Vec<ArmedStub>,
+    pub mode: crate::server::ClaimMode,
 }
 
 pub struct ArmedStub {
@@ -68,6 +71,7 @@ impl Session {
                     name: name.clone(),
                     prefix: dep.mount(name),
                     unmatched: dep.unmatched.clone(),
+                    mode: crate::server::claim_mode(dep, &default_unmatched),
                     stubs: dep
                         .stubs
                         .iter()
@@ -84,6 +88,7 @@ impl Session {
             .collect();
         Self {
             key: key.to_string(),
+            flow: None,
             deps,
             default_unmatched,
             log: Mutex::new(Vec::new()),
@@ -115,6 +120,8 @@ pub struct SessionReport {
     /// Dependencies whose unmatched policy was `fail` and that received
     /// at least one unmatched request.
     pub unmatched_hits: Vec<RecordedExchange>,
+    /// Dependencies this test forbids: empty mounts with a `fail` policy.
+    pub forbidden_deps: Vec<String>,
     pub base_urls: IndexMap<String, String>,
 }
 
@@ -156,6 +163,13 @@ impl SessionGuard {
         SessionReport {
             mocked_deps: self.session.deps.keys().cloned().collect(),
             unmatched_hits,
+            forbidden_deps: self
+                .session
+                .deps
+                .values()
+                .filter(|d| d.mode == crate::server::ClaimMode::Forbid)
+                .map(|d| d.name.clone())
+                .collect(),
             base_urls: self.base_urls(),
             recordings,
         }

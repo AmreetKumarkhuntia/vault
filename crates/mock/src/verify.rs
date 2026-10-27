@@ -7,28 +7,6 @@ use crate::matcher::{body_matches, component_score, full_score, request_matches}
 use crate::record::RecordedExchange;
 use crate::session::SessionReport;
 
-/// A test that declares no mocks must make no outbound call; every recording
-/// the default `unmatched` policy flags is reported.
-pub fn verify_undeclared(report: &SessionReport) -> VerifyOutcome {
-    let mut out = VerifyOutcome::default();
-    for hit in &report.unmatched_hits {
-        out.checks.push(CheckResult::Fail(CheckFailure::new(
-            format!(
-                "undeclared outbound call (served {}): {} {}",
-                crate::UNMATCHED_STATUS,
-                hit.request.method,
-                hit.request.path
-            ),
-            "mocks".to_string(),
-            json!("a test without mocks must make no outbound call"),
-            FailureKind::UnexpectedCall {
-                exchange: hit.to_report_value(),
-            },
-        )));
-    }
-    out
-}
-
 pub fn verify_calls(
     report: &SessionReport,
     calls: &[CallExpect],
@@ -46,6 +24,13 @@ pub fn verify_calls(
                 "mock `{}`: stub `{}` matched {} {} but its response template failed: {error}",
                 hit.dependency,
                 stub.as_deref().unwrap_or("?"),
+                hit.request.method,
+                hit.request.path
+            ),
+            (None, _) if report.forbidden_deps.contains(&hit.dependency) => format!(
+                "dependency `{}` must not be called (served {}): {} {}",
+                hit.dependency,
+                crate::UNMATCHED_STATUS,
                 hit.request.method,
                 hit.request.path
             ),

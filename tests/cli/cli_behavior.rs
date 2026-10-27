@@ -1883,3 +1883,391 @@ fn serial_tagged_items_run_after_the_lanes_with_their_reset() {
     );
     assert!(!reset_boundary("charlie"));
 }
+
+/// A suite whose target is the mock listener itself, so a test's own request is the
+/// outbound call the listener sees. Reports land in the sandbox root.
+fn mock_target_suite(sandbox: &TempDir) -> PathBuf {
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        suite.join("vault.yaml"),
+        format!(
+            "version: 1\nenvironments:\n  local:\n    target: {{ base_url: \"http://127.0.0.1:{port}\" }}\n    mock_server: {{ bind: 127.0.0.1:{port} }}\nreport:\n  json: report.json\n  html: report.html\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        suite.join("mocker.test.yaml"),
+        "test: mocker\nmocks:\n  platform:\n    stubs:\n      - match: { path: /x }\n        response: { status: 200 }\nverify:\n  settle: 1s\n",
+    )
+    .unwrap();
+    fs::write(
+        suite.join("caller.test.yaml"),
+        "test: caller\nsteps:\n  - name: stray\n    request: { method: GET, path: /nobody/x }\n    expect: { status: 599 }\n",
+    )
+    .unwrap();
+    suite
+}
+
+fn json_report(sandbox: &TempDir) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(sandbox.path().join("report.json")).unwrap()).unwrap()
+}
+
+fn statuses(report: &serde_json::Value) -> Vec<(String, String)> {
+    report["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                t["name"].as_str().unwrap().into(),
+                t["status"].as_str().unwrap().into(),
+            )
+        })
+        .collect()
+}
+
+fn reset_boundary(html: &serde_json::Value, name: &str) -> bool {
+    let test = html["metadata"]["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap();
+    let execution = &html["executions"][test["execution_index"].as_u64().unwrap() as usize];
+    execution["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["phase"] == "preparation")
+        .unwrap()["details"]["reset_boundary"]
+        == true
+}
+
+#[test]
+fn an_unattributed_call_reruns_every_candidate_serially_and_nobody_is_blamed() {
+    let sandbox = TempDir::new("orphan-rerun");
+    let suite = mock_target_suite(&sandbox);
+
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .args(["--parallel", "2"]);
+    let result = output(&mut command);
+    assert_exit(&result, 0);
+    assert!(
+        text(&result.stdout).contains("unattributed outbound call(s)"),
+        "{}",
+        text(&result.stdout)
+    );
+
+    let report = json_report(&sandbox);
+    assert!(
+        statuses(&report)
+            .iter()
+            .all(|(_, status)| status == "PASSED"),
+        "{:?}",
+        statuses(&report)
+    );
+    let orphans = report["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 1, "{orphans:?}");
+    assert_eq!(orphans[0]["path"], "/nobody/x");
+    let candidates: Vec<&str> = orphans[0]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["test"].as_str().unwrap())
+        .collect();
+    assert!(
+        candidates.contains(&"mocker") && candidates.contains(&"caller"),
+        "{candidates:?}"
+    );
+    let reruns = report["reruns"].as_array().unwrap();
+    assert_eq!(reruns.len(), 2, "{reruns:?}");
+    assert!(reruns
+        .iter()
+        .all(|r| r["reason"] == "unattributed outbound call during the parallel run"));
+    assert!(reruns.iter().all(|r| r["first_attempt"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["status"] == "PASSED")));
+
+    let html = html_data(&sandbox.path().join("report.html"));
+    assert!(html["metadata"]["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["rerun"].is_string()));
+    assert_eq!(html["run"]["orphans"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn no_rerun_keeps_parallel_results_notes_the_candidates_and_fails_the_run() {
+    let sandbox = TempDir::new("orphan-no-rerun");
+    let suite = mock_target_suite(&sandbox);
+
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .args(["--parallel", "2", "--no-rerun"]);
+    let result = output(&mut command);
+    assert_exit(&result, 1);
+    let stdout = text(&result.stdout);
+    assert!(stdout.contains("GET /nobody/x  candidates:"), "{stdout}");
+
+    let report = json_report(&sandbox);
+    assert!(
+        statuses(&report)
+            .iter()
+            .all(|(_, status)| status == "PASSED"),
+        "{:?}",
+        statuses(&report)
+    );
+    assert!(report.get("reruns").is_none());
+    let noted = report["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["verify"].to_string().contains("not blamed, --no-rerun"))
+        .count();
+    assert_eq!(noted, 2, "{report}");
+}
+
+#[test]
+fn a_flow_stage_candidate_reruns_its_flow_once_and_tail_items_are_not_rerun() {
+    let sandbox = TempDir::new("orphan-flow");
+    let suite = mock_target_suite(&sandbox);
+    fs::copy(
+        suite.join("mocker.test.yaml"),
+        suite.join("mocker2.test.yaml"),
+    )
+    .unwrap();
+    let second = fs::read_to_string(suite.join("mocker2.test.yaml"))
+        .unwrap()
+        .replace("test: mocker", "test: mocker2");
+    fs::write(suite.join("mocker2.test.yaml"), second).unwrap();
+    fs::write(
+        suite.join("chain.flow.yaml"),
+        "flow: chain\nstages:\n  - test: mocker\n  - test: mocker2\n",
+    )
+    .unwrap();
+    fs::write(
+        suite.join("caller.test.yaml"),
+        "test: caller\nsteps:\n  - name: x\n    request: { method: GET, path: /nobody/x }\n    expect: { status: 599 }\n  - name: y\n    request: { method: GET, path: /nobody/y }\n    expect: { status: 599 }\n",
+    )
+    .unwrap();
+    fs::write(
+        suite.join("tailer.test.yaml"),
+        "test: tailer\nserial: owns the lane\nsteps: []\n",
+    )
+    .unwrap();
+
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .args(["--parallel", "2"]);
+    assert_exit(&output(&mut command), 0);
+
+    let report = json_report(&sandbox);
+    assert_eq!(report["orphans"].as_array().unwrap().len(), 2);
+    let reruns = report["reruns"].as_array().unwrap();
+    let html = html_data(&sandbox.path().join("report.html"));
+    let item_name = |id: &serde_json::Value| {
+        html["metadata"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == *id)
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let mut rerun_names: Vec<String> = reruns.iter().map(|r| item_name(&r["item"])).collect();
+    rerun_names.sort();
+    assert_eq!(
+        rerun_names,
+        ["caller", "chain"],
+        "the flow re-runs once for both orphans; the tail item never does"
+    );
+    let names: Vec<_> = statuses(&report)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        ["mocker", "mocker2", "caller", "tailer"],
+        "re-run results replace the parallel ones in plan order"
+    );
+    let tailer = html["metadata"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "tailer")
+        .unwrap();
+    assert_eq!(tailer["serial"]["reason"], "owns the lane");
+}
+
+fn serial_suite(sandbox: &TempDir) -> PathBuf {
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    fs::copy(
+        fixture("reporting").join("vault.yaml"),
+        suite.join("vault.yaml"),
+    )
+    .unwrap();
+    let step = |name: &str| {
+        format!("steps:\n  - name: {name} request\n    request: {{ method: GET, path: /pass }}\n    expect: {{ status: 200 }}\n")
+    };
+    fs::write(
+        suite.join("alpha.test.yaml"),
+        format!("test: alpha\n{}", step("alpha")),
+    )
+    .unwrap();
+    fs::write(
+        suite.join("bravo.test.yaml"),
+        format!(
+            "test: bravo\nserial: touches GLOBAL_CONFIG\n{}",
+            step("bravo")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        suite.join("charlie.test.yaml"),
+        format!("test: charlie\nserial: needs the lane\n{}", step("charlie")),
+    )
+    .unwrap();
+    fs::write(
+        suite.join("delta.test.yaml"),
+        format!("test: delta\ntags: [global]\n{}", step("delta")),
+    )
+    .unwrap();
+    fs::write(
+        suite.join("echo.test.yaml"),
+        format!("test: echo\n{}", step("echo")),
+    )
+    .unwrap();
+    fs::write(
+        suite.join("chain.flow.yaml"),
+        "flow: chain\nstages:\n  - test: alpha\n  - test: bravo\n",
+    )
+    .unwrap();
+    suite
+}
+
+#[test]
+fn serial_declarations_send_items_and_their_flows_to_the_tail() {
+    let sandbox = TempDir::new("serial-yaml");
+    let server = HttpServer::start();
+    let suite = serial_suite(&sandbox);
+
+    let mut command = vault_command(&sandbox);
+    command
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .args(["--parallel", "2", "--serial-tag", "global"])
+        .env(TARGET_URL_ENV, server.url());
+    assert_exit(&output(&mut command), 0);
+
+    let html = html_data(&sandbox.path().join("config-report.html"));
+    let items = html["metadata"]["items"].as_array().unwrap();
+    let serial_of =
+        |name: &str| items.iter().find(|i| i["name"] == name).unwrap()["serial"].clone();
+    assert_eq!(
+        serial_of("chain"),
+        serde_json::json!({"reason": "touches GLOBAL_CONFIG", "stage": "bravo"})
+    );
+    assert_eq!(
+        serial_of("charlie"),
+        serde_json::json!({"reason": "needs the lane"})
+    );
+    assert_eq!(
+        serial_of("delta"),
+        serde_json::json!({"reason": "tag `global`"})
+    );
+    assert!(serial_of("echo").is_null());
+    assert!(
+        reset_boundary(&html, "alpha"),
+        "a serial flow resets like a serial run"
+    );
+    assert!(reset_boundary(&html, "charlie"));
+    assert!(reset_boundary(&html, "delta"));
+    assert!(!reset_boundary(&html, "echo"));
+
+    let mut list = vault_command(&sandbox);
+    list.arg("list").arg("--suite-dir").arg(&suite);
+    let listed = text(&output(&mut list).stdout);
+    assert!(
+        listed.contains("2. bravo  (serial: touches GLOBAL_CONFIG)"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("charlie  (serial: needs the lane)"),
+        "{listed}"
+    );
+
+    let mut serial = vault_command(&sandbox);
+    serial
+        .arg("run")
+        .arg("--suite-dir")
+        .arg(&suite)
+        .args(["--parallel", "1"])
+        .env(TARGET_URL_ENV, server.url());
+    assert_exit(&output(&mut serial), 0);
+    let html = html_data(&sandbox.path().join("config-report.html"));
+    assert!(
+        html["metadata"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["serial"].is_null()),
+        "one lane ignores serial"
+    );
+    for name in ["alpha", "charlie", "delta", "echo"] {
+        assert!(reset_boundary(&html, name), "{name}");
+    }
+    let names: Vec<_> = statuses(&json_report_at(&sandbox.path().join("config-report.json")))
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(names, ["alpha", "bravo", "charlie", "delta", "echo"]);
+}
+
+fn json_report_at(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn an_empty_serial_reason_fails_validation() {
+    let sandbox = TempDir::new("serial-empty");
+    let suite = sandbox.path().join("suite");
+    fs::create_dir_all(&suite).unwrap();
+    fs::write(suite.join("vault.yaml"), PLAIN_CONFIG).unwrap();
+    fs::write(
+        suite.join("e.test.yaml"),
+        "test: e\nserial: \"\"\nsteps: []\n",
+    )
+    .unwrap();
+    let mut command = vault_command(&sandbox);
+    command.arg("validate").arg("--suite-dir").arg(&suite);
+    let result = output(&mut command);
+    assert_exit(&result, 2);
+    assert!(
+        text(&result.stderr).contains("serial: give a reason"),
+        "{}",
+        text(&result.stderr)
+    );
+}

@@ -297,7 +297,13 @@ verify:                           # end-state, evaluated after all steps
       count: 1                    # also {gte: n}, {lte: n}; 0 = "never called"
   ordered: [[exactly one charge, confirmation email]]
   unexpected: fail                # unplanned traffic to mocked deps fails the test
+  no_calls: [euler]               # must never be called; shares its lane with other no_calls tests
 ```
+
+`verify.no_calls` names dependencies the target must not call at all; an entry such as
+`{ dependency: platform, prefix: /platform/s }` forbids one path. An empty `mocks` entry whose
+unmatched policy is `fail` means the same thing. For one endpoint of a stubbed dependency use
+`verify.calls` with `count: 0` instead.
 
 ### PostgreSQL SQL fixtures
 
@@ -432,16 +438,29 @@ Above 1 lane, isolation moves from each test to the whole run:
 - Items never reset. `reset: once`, `reset: each`, and standalone resets are skipped, and each
   test applies only its local `seed` on top of the shared baseline.
 - The target reaches one fixed mock URL, so the listener routes each outbound call by the mount
-  prefix that covers its path. A test claims every prefix it mocks before it starts; two tests
-  whose prefixes overlap (`/platform` and `/platform/s`, or any prefix and the root mount) run one
-  after the other, and the wait is not counted as test time. A call to a prefix no running test
-  mocks is recorded as `<unknown>` in every running test.
+  prefix that covers its path. A test claims every prefix it mocks or forbids before it starts.
+  A stubbed mount is exclusive: two tests whose stubbed prefixes overlap (`/platform` and
+  `/platform/s`, or any prefix and the root mount) run one after the other. A forbidden mount
+  (`verify.no_calls`, or an empty `mocks` entry whose unmatched policy is `fail`) is shared: any
+  number of tests can forbid the same prefix at once and wait only for a test that stubs it.
+  Claims are granted in arrival order, so a waiting stub owner is never starved by forbids, and
+  the wait is not counted as test time. A forbidden call fails every test forbidding that prefix
+  at the time; a call to a prefix no running test claims goes to the orphan log described below.
 - Tests that declare `watch` run alone, because `watch` diffs whole tables. Other lanes wait while
   such a test runs.
 - `--step` requires serial execution and is rejected with `--parallel` above 1.
-- `--serial-tag TAG` (repeatable) keeps items carrying that tag out of the lanes. They run after
-  every lane has finished, one at a time, with the per-item reset of a serial run. Use it for the
-  few flows that change global state.
+- `serial: <reason>` on a test or flow keeps it out of the lanes. A flow is serial when it declares
+  the field or when any of its stages does. `--serial-tag TAG` (repeatable) selects more items from
+  the command line. Serial items run after every lane has finished, one at a time, with the
+  per-item reset of a serial run. Prefer the YAML field for tests that change global state or
+  make calls they cannot declare; `vault list` and the report show the reason.
+- A call that no armed test claims cannot be attributed above one lane, so it is answered 599 and
+  logged instead of being recorded against anyone. After the lanes and the serial tail, every item
+  that was armed at the time is re-run one at a time; its serial result replaces the parallel one
+  and the report keeps the first attempt beside it, with the orphan log. `--no-rerun` skips that:
+  candidates keep their parallel results with a note, the orphan log is printed, and the run exits
+  non-zero so the calls are never lost.
+- Execution order: lanes, then the serial tail, then re-runs. `--parallel 1` ignores all of it.
 
 The global seed renders once for the whole run, not once per test:
 
@@ -490,9 +509,9 @@ CI, coverage, and application behavior.
   only rows that contain that document (jsonb containment, so equality on scalars). A test whose
   watch entries are all scoped does not block other lanes, but a scoped watch no longer proves
   that nothing else in the table changed.
-- A test that declares no `mocks` fails with `undeclared outbound call` when the target still
-  reaches the mock listener during it; it pays no settle wait. `defaults.mock.unmatched: allow`
-  keeps those calls silent.
+- A test that declares no `mocks` still records what the target sent to the mock listener during
+  it. Those calls appear in the test's report entry but never fail the test, and it pays no settle
+  wait.
 - Fields and headers whose name ends in `password`, `passwd`, `secret`, `token`, `apikey`,
   `authorization`, `cookie`, `privatekey` or `passphrase` are masked in reports by default.
 - Ctrl-C or SIGTERM during `vault run` still writes the reports for finished items and exits `130`.

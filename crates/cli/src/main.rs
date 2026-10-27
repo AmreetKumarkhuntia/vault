@@ -50,6 +50,9 @@ enum Command {
         /// With --parallel above 1, items carrying this tag run after the lanes, one at a time, with their normal reset (repeatable)
         #[arg(long = "serial-tag", value_name = "TAG")]
         serial_tag: Vec<String>,
+        /// Keep the parallel results of items that could have made an unattributed outbound call instead of re-running them serially; the run then exits non-zero
+        #[arg(long)]
+        no_rerun: bool,
         /// Write the JSON report here (overrides config)
         #[arg(long)]
         report: Option<String>,
@@ -121,6 +124,7 @@ fn main() {
             seed,
             parallel,
             serial_tag,
+            no_rerun,
             report,
             junit,
             html,
@@ -135,6 +139,7 @@ fn main() {
             seed,
             parallel,
             serial_tags: serial_tag,
+            no_rerun,
             report,
             junit,
             html,

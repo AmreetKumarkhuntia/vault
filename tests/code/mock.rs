@@ -79,6 +79,7 @@ fn report(recordings: Vec<RecordedExchange>, deps: &[&str]) -> SessionReport {
         recordings,
         mocked_deps: deps.iter().map(|s| s.to_string()).collect(),
         unmatched_hits: vec![],
+        forbidden_deps: vec![],
         base_urls: IndexMap::new(),
     }
 }
